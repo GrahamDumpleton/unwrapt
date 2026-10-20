@@ -1,0 +1,10 @@
+# Everything in this directory is working notes and scratch material that
+# stays local: none of it belongs in the project, so ignore it all.
+
+/*
+
+# This file is the one exception. It must be tracked so the rules above
+# ship with the repository and the directory itself is not ignored
+# wholesale from the root .gitignore.
+
+!.gitignore
