@@ -1,0 +1,113 @@
+[build-system]
+# Reading the dynamic version imports the package. unwrapt's
+# __init__.py stays inert: it imports nothing beyond the standard
+# library and installs no hook, so wrapt is not needed at build time.
+requires = ["setuptools>=62.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "unwrapt"
+dynamic = ["version"]
+description = "Defer whole-module imports until first use on Pythons below 3.15, emulating PEP 810's __lazy_modules__, with a profile mode that reports what imports cost and what is worth deferring. Built on wrapt."
+readme = "README.md"
+license = "BSD-2-Clause"
+license-files = ["LICENSE"]
+authors = [
+    {name = "Graham Dumpleton", email = "Graham.Dumpleton@gmail.com"}
+]
+requires-python = ">=3.12"
+keywords = ["lazy imports", "import", "startup time", "PEP 810", "wrapt"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Programming Language :: Python :: 3.15",
+    "Programming Language :: Python :: Implementation :: CPython",
+]
+dependencies = [
+    "wrapt>=2.4.1",
+]
+
+[project.urls]
+Homepage = "https://github.com/GrahamDumpleton/unwrapt"
+Documentation = "https://unwrapt.readthedocs.io"
+"Bug Tracker" = "https://github.com/GrahamDumpleton/unwrapt/issues/"
+
+# The zero-code injection trigger, in the shape autowrapt consumes:
+# AUTOWRAPT_BOOTSTRAP=unwrapt names this entry point group, which
+# autowrapt hands to wrapt.discover_post_import_hooks() at interpreter
+# startup. Each entry maps a trigger module to a callback; hooking os,
+# which is always already imported by then, makes the callback fire
+# immediately at startup, before the application's own imports. Inert
+# metadata unless autowrapt is installed and the environment variable
+# is set; unwrapt itself has no dependency on autowrapt and never
+# imports it.
+
+[project.entry-points.unwrapt]
+os = "unwrapt.bootstrap:bootstrap"
+
+[project.optional-dependencies]
+dev = [
+    "mypy",
+    "pytest",
+    "ruff",
+    "setuptools",
+]
+docs = [
+    "myst-parser",
+    "sphinx",
+    "sphinx-rtd-theme",
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+zip-safe = false
+packages = ["unwrapt"]
+
+[tool.setuptools.package-data]
+unwrapt = ["py.typed"]
+
+[tool.setuptools.dynamic]
+version = {attr = "unwrapt.__version__"}
+
+[dependency-groups]
+test = [
+    # autowrapt is a test dependency only, so the end to end bootstrap
+    # tests can run: the package itself neither depends on it nor
+    # imports it, and the tests skip themselves when it is absent
+    # (the CI plain install job runs without it).
+    "autowrapt",
+    "pytest",
+]
+dev = [
+    {include-group = "test"},
+    "mypy",
+    "ruff",
+    "setuptools",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+files = ["src/unwrapt", "tests"]
+
+[tool.ruff]
+line-length = 88
+target-version = "py312"
+
+[tool.ruff.lint]
+# Version information is defined before the imports in __init__.py.
+per-file-ignores = {"src/unwrapt/__init__.py" = ["E402"]}
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+]

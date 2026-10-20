@@ -1,0 +1,6 @@
+{
+    "__main__": ["sqlite3", "xml.dom"],
+    "myapp.analytics": ["xml.dom"],
+    "myapp.client": ["wave"],
+    "myapp.web": ["decimal"]
+}

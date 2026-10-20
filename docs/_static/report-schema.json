@@ -1,0 +1,50 @@
+{
+    "schema": 1,
+    "unwrapt": "1.0.0a1",
+    "python": "3.14.0",
+    "total_import_ms": 1240.5,
+    "summary": {
+        "modules_loaded": 13,
+        "edge_count": 47,
+        "best_cut": 12,
+        "estimated_saving_ms": 640.0,
+        "estimate_note": "conservative; edge times nest and are not additive",
+        "filters": {
+            "min_ms": 0.0,
+            "packages": null
+        }
+    },
+    "edges": [
+        {
+            "id": 12,
+            "parent_id": 3,
+            "imported": "yaml",
+            "importer": "mypkg.config",
+            "line": 7,
+            "kind": "from",
+            "level": "module",
+            "loaded": true,
+            "cum_ms": 96.4,
+            "self_ms": 0.2,
+            "deferrable": {"native": true, "unwrapt": false},
+            "unwrapt_limit": "from-import",
+            "already_lazy": false,
+            "native_lazy": false,
+            "other_eager_importers": []
+        }
+    ],
+    "heavy_modules": [
+        {"module": "numpy", "self_ms": 388.0}
+    ],
+    "chains": [
+        {
+            "module": "numpy",
+            "self_ms": 388.0,
+            "links": [3, 9, 12],
+            "best_cut": 9
+        }
+    ],
+    "by_importer": [
+        {"importer": "mypkg.web", "cum_ms": 412.3}
+    ]
+}
