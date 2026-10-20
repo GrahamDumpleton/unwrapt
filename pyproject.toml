@@ -18,7 +18,7 @@ authors = [
 requires-python = ">=3.12"
 keywords = ["lazy imports", "import", "startup time", "PEP 810", "wrapt"]
 classifiers = [
-    "Development Status :: 4 - Beta",
+    "Development Status :: 3 - Alpha",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",

@@ -29,7 +29,7 @@ without changing your application code: with
 [autowrapt](https://github.com/GrahamDumpleton/autowrapt) installed,
 one environment variable activates it.
 
-> **Status: beta, ahead of 1.0.0.** Pre-releases are published to
+> **Status: alpha, ahead of 1.0.0.** Pre-releases are published to
 > PyPI, and until 1.0.0 is final a plain `pip install unwrapt` picks
 > up the latest pre-release automatically, so there is no need to pin
 > a specific version. Small API changes are still possible before

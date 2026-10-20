@@ -30,11 +30,11 @@ cost on a real run and reports what is worth deferring, on any Python
 version including 3.15.
 
 ```{note}
-unwrapt is in beta ahead of 1.0.0, with pre-releases published to
+unwrapt is in alpha ahead of 1.0.0, with pre-releases published to
 [PyPI](https://pypi.org/project/unwrapt/). Until 1.0.0 is final, a
 plain `pip install unwrapt` picks up the latest pre-release
 automatically, so there is no need to pin a specific version. Small
-API changes are still possible before 1.0.0. What the beta series
+API changes are still possible before 1.0.0. What the alpha series
 needs now is use: reports of it working, or not, on real code, and of
 what confused or was missing, go to the
 [issue tracker](https://github.com/GrahamDumpleton/unwrapt/issues).

@@ -2,7 +2,7 @@
 
 ## Version 1.0.0
 
-The first release series, in beta ahead of the 1.0.0 final. Pre-releases
+The first release series, in alpha ahead of the 1.0.0 final. Pre-releases
 are published to [PyPI](https://pypi.org/project/unwrapt/); until the
 final is out, a plain `pip install unwrapt` picks up the latest
 pre-release automatically, and small changes are still possible.
