@@ -9,6 +9,15 @@ hook modules so is_installed() can be answered without importing them.
 
 import sys
 
+# Callable is needed only for annotations, and importing collections.abc
+# would load collections into every process that imports unwrapt, so it
+# is imported for type checkers alone and the annotations are strings.
+
+TYPE_CHECKING = False
+
+if TYPE_CHECKING:
+    from collections.abc import Callable
+
 # PEP 810 lazy imports are provided natively from Python 3.15.
 NATIVE_LAZY_IMPORTS = (3, 15)
 
@@ -18,6 +27,13 @@ NATIVE_LAZY_IMPORTS = (3, 15)
 
 _defer_installed = False
 _profile_installed = False
+
+# The on_resolve() subscribers, as a tuple replaced whole on each
+# change, so a resolve in one thread can read it while another thread
+# subscribes. They live here rather than with the shim so subscribing
+# never imports wrapt.
+
+_resolve_subscribers: "tuple[Callable[..., object], ...]" = ()
 
 
 def has_native_lazy_imports() -> bool:
@@ -63,3 +79,34 @@ def mark_profile(installed: bool) -> None:
     global _profile_installed
 
     _profile_installed = installed
+
+
+def resolve_subscribers() -> "tuple[Callable[..., object], ...]":
+    """The on_resolve() callbacks, in the order they subscribed."""
+
+    return _resolve_subscribers
+
+
+def subscribe(callback: "Callable[..., object]") -> "Callable[[], None]":
+    """Add an on_resolve() callback, returning the function that removes it.
+
+    Removing it twice, or after it was removed some other way, does
+    nothing.
+    """
+
+    global _resolve_subscribers
+
+    _resolve_subscribers = (*_resolve_subscribers, callback)
+
+    def unsubscribe() -> None:
+        """Stop calling the callback when a deferred proxy resolves."""
+
+        global _resolve_subscribers
+
+        subscribers = list(_resolve_subscribers)
+
+        if callback in subscribers:
+            subscribers.remove(callback)
+            _resolve_subscribers = tuple(subscribers)
+
+    return unsubscribe

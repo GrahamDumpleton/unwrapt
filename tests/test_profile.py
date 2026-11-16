@@ -345,6 +345,8 @@ def test_json_schema_shape(tmp_path: Path) -> None:
     assert isinstance(report["heavy_modules"], list)
     assert isinstance(report["chains"], list)
     assert isinstance(report["by_importer"], list)
+    assert report["deferred_unused"] == []
+    assert report["deferred_used"] == []
 
     edge = report["edges"][0]
 
@@ -364,6 +366,8 @@ def test_json_schema_shape(tmp_path: Path) -> None:
         "already_lazy",
         "native_lazy",
         "deferred",
+        "resolves",
+        "used_in",
         "other_eager_importers",
     ):
         assert field in edge

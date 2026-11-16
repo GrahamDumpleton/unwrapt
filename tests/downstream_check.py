@@ -35,3 +35,11 @@ install_from_env: Callable[[], bool] = unwrapt.install_from_env
 layers: unwrapt.Installed | None = unwrapt.installed()
 uninstall: Callable[[], bool] = unwrapt.uninstall
 explicit: bool = unwrapt.install(config, defer=True, profile=False)
+deferrals: list[unwrapt.Deferral] = unwrapt.deferred()
+
+
+def on_resolution(resolution: unwrapt.Resolution) -> None:
+    print(resolution.module, resolution.load_ms, resolution.thread.name)
+
+
+unsubscribe: Callable[[], None] = unwrapt.on_resolve(on_resolution)

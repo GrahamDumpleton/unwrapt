@@ -28,10 +28,11 @@ import threading
 import time
 import types
 from collections.abc import Callable, Mapping, Sequence
-from typing import Literal, TypeAlias
+from typing import Literal, TypeAlias, cast
 
 from unwrapt._compat import has_native_lazy_imports, mark_profile
 from unwrapt._config import Config, ProfileOptions, is_candidate, is_native_pending
+from unwrapt._records import Resolution
 from unwrapt._report import Edge, Report, build_report, render_json, render_text
 
 ImportFunction = Callable[..., types.ModuleType]
@@ -44,13 +45,34 @@ ImportFunction = Callable[..., types.ModuleType]
 _StackEntry: TypeAlias = tuple[int, list[float]]
 
 
+class _ResolveToken:
+    """The state of one resolve between begin_resolve and end_resolve."""
+
+    __slots__ = ("child_time", "edge_id", "parent_id", "start")
+
+    def __init__(
+        self,
+        edge_id: int,
+        parent_id: int | None,
+        child_time: list[float],
+        start: float,
+    ) -> None:
+        self.edge_id = edge_id
+        self.parent_id = parent_id
+        self.child_time = child_time
+        self.start = start
+
+
 class Recorder:
     """One installed recorder layer.
 
     active is False once the recorder is stopped, which turns its hook
     into plain pass-through. next_import is the import function it
     chains to, the shim or the original. shim_local is the shim's
-    thread-local deferred flag when the shim sits below, or None.
+    thread-local deferred flag when the shim sits below, or None, and
+    deferred_edges maps each of the shim's deferral records to the id
+    of the edge that recorded the deferral, so a later resolve can be
+    tied back to it.
 
     One lock guards the state shared across threads, the edge id counter
     and the edge list: import calls can be made from any thread,
@@ -62,6 +84,7 @@ class Recorder:
     __slots__ = (
         "active",
         "config",
+        "deferred_edges",
         "edges",
         "hook",
         "local",
@@ -84,13 +107,102 @@ class Recorder:
         self.lock = threading.Lock()
         self.next_id = 0
         self.edges: list[Edge] = []
+        self.deferred_edges: dict[object, int] = {}
         self.local = threading.local()
         self.hook: ImportFunction = _make_hook(self)
+
+    def stack(self) -> list[_StackEntry]:
+        """This thread's stack of in-progress import calls."""
+
+        stack: list[_StackEntry] | None = getattr(self.local, "stack", None)
+
+        if stack is None:
+            stack = []
+            self.local.stack = stack
+
+        return stack
+
+    def begin_resolve(self) -> object | None:
+        """Open a resolve as an import call, so its imports nest in it.
+
+        Returns None to record nothing: when the recorder is stopped, or
+        the resolve was triggered by the recorder's own bookkeeping.
+        """
+
+        if not self.active or getattr(self.local, "reentrant", False):
+            return None
+
+        stack = self.stack()
+        parent_id = stack[-1][0] if stack else None
+
+        with self.lock:
+            edge_id = self.next_id
+            self.next_id += 1
+
+        child_time = [0.0]
+        stack.append((edge_id, child_time))
+
+        return _ResolveToken(edge_id, parent_id, child_time, time.perf_counter())
+
+    def end_resolve(
+        self,
+        token: object,
+        record: object,
+        resolution: Resolution | None,
+    ) -> None:
+        """Close a resolve, recording it as a resolve edge.
+
+        The edge carries the module's load cost, where it was first used,
+        and the id of the deferred edge it resolves. A resolve whose
+        import raised records nothing, and neither does one that ends
+        after the recorder was stopped.
+        """
+
+        state = cast(_ResolveToken, token)
+        elapsed = (time.perf_counter() - state.start) * 1000.0
+
+        stack = self.stack()
+
+        if stack and stack[-1][0] == state.edge_id:
+            stack.pop()
+
+        if stack:
+            stack[-1][1][0] += elapsed
+
+        if resolution is None or not self.active:
+            return
+
+        edge = Edge(
+            id=state.edge_id,
+            parent_id=state.parent_id,
+            importer=resolution.importer,
+            imported=resolution.module,
+            kind="resolve",
+            level_name="module",
+            line=resolution.line,
+            file=resolution.file,
+            loaded=resolution.loaded,
+            cum_ms=elapsed,
+            self_ms=elapsed - state.child_time[0],
+            native_lazy=False,
+            already_lazy=True,
+            resolves=self.deferred_edges.get(record),
+            used_in=resolution.used_in,
+        )
+
+        with self.lock:
+            self.edges.append(edge)
 
 
 # The recorder layer currently installed, or None.
 
 _current: Recorder | None = None
+
+
+def current() -> Recorder | None:
+    """The recorder layer currently installed, or None."""
+
+    return _current
 
 
 def install_profile(config: Config, shim_local: threading.local | None) -> bool:
@@ -191,9 +303,19 @@ def _stop(recorder: Recorder, write: bool) -> Report:
     _current = None
     mark_profile(False)
 
+    # The shim, when installed, no longer reports resolves to this
+    # recorder. It is looked up rather than imported, since the
+    # recorder alone never imports wrapt.
+
+    hook_module = sys.modules.get("unwrapt._hook")
+
+    if hook_module is not None and hook_module.tracer() is recorder:
+        hook_module.set_tracer(None)
+
     with recorder.lock:
         edges = list(recorder.edges)
         recorder.edges.clear()
+        recorder.deferred_edges.clear()
 
     options = recorder.config.profile
     report = build_report(edges, options)
@@ -281,10 +403,10 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
         as children while unwrapt's own machinery chains straight
         through, unrecorded.
 
-        The shim, when it sits below, sets its deferred flag when it
-        hands back a proxy. The flag is cleared before the call and read
-        and cleared again after it, so a deferral by a nested call is
-        never mistaken for this one.
+        The shim, when it sits below, sets its deferred flag to the
+        proxy's record when it hands one back. The flag is cleared
+        before the call and read and cleared again after it, so a
+        deferral by a nested call is never mistaken for this one.
         """
 
         if not recorder.active or getattr(local, "reentrant", False):
@@ -297,11 +419,7 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
         local.reentrant = True
 
         try:
-            stack: list[_StackEntry] | None = getattr(local, "stack", None)
-
-            if stack is None:
-                stack = []
-                local.stack = stack
+            stack = recorder.stack()
 
             parent_id = stack[-1][0] if stack else None
 
@@ -338,7 +456,7 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
             stack.append((edge_id, child_time))
 
             if shim_local is not None:
-                shim_local.deferred = False
+                shim_local.deferred = None
 
             start = time.perf_counter()
 
@@ -355,11 +473,15 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
                 elapsed = (time.perf_counter() - start) * 1000.0
                 stack.pop()
 
-                deferred = False
+                record: object = None
 
                 if shim_local is not None:
-                    deferred = getattr(shim_local, "deferred", False)
-                    shim_local.deferred = False
+                    record = getattr(shim_local, "deferred", None)
+                    shim_local.deferred = None
+
+                if record is not None:
+                    with lock:
+                        recorder.deferred_edges[record] = edge_id
 
                 if stack:
                     stack[-1][1][0] += elapsed
@@ -385,7 +507,7 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
                         if globals is not None
                         else False
                     ),
-                    deferred=deferred,
+                    deferred=record is not None,
                 )
 
                 with lock:

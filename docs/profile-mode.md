@@ -88,11 +88,13 @@ hits, one edge is recorded:
 - the ids linking each edge to the import call it happened inside,
   which is how the report builds the tree and the chains.
 
-A module the shim deferred is loaded later through
+A module the shim deferred is loaded at first use through
 `importlib.import_module`, which does not pass through
-`builtins.__import__`, so its own load is not an edge. The imports that
-module makes do pass through the hook, and are recorded as outermost
-edges, with the module as their importer.
+`builtins.__import__`. The shim times that load itself, and the
+recorder records it as a `resolve` edge, with where the module was
+first used and the imports it made nested beneath it. The report's
+[deferral sections](reading-the-report.md#deferral-sections) then say
+which deferred imports were used anyway, and which never were.
 
 On Python 3.15 and later, native lazy imports are left exactly as
 they are: a declared-lazy import that the run touches is recorded at

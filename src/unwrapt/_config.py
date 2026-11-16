@@ -163,19 +163,6 @@ class Config:
         object.__setattr__(self, "lazy_modules", normalised)
 
 
-@dataclass(frozen=True, kw_only=True)
-class Installed:
-    """Which unwrapt layers are installed in this process.
-
-    defer is the shim, which defers imports, and profile the recorder,
-    which records them. unwrapt.installed() returns None rather than an
-    Installed with both false.
-    """
-
-    defer: bool
-    profile: bool
-
-
 _TOP_LEVEL_KEYS = frozenset({"config_only", "debug", "lazy_modules", "profile"})
 _PROFILE_KEYS = frozenset({"output", "format", "min_ms", "packages"})
 

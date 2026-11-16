@@ -112,6 +112,38 @@ unwrapt.is_installed() -> bool
 
 Whether either layer is installed in this process.
 
+## unwrapt.deferred
+
+```python
+unwrapt.deferred() -> list[Deferral]
+```
+
+Each lazy proxy the shim has handed out in this process, in order, as
+a `Deferral`: the importer whose statement was deferred, the module,
+and whether the proxy has been resolved. It needs no recording, so a
+server can log at the fork what was deferred and what of it was
+loaded anyway, with only deferral on. Proxies handed out before
+`uninstall()` are still listed, since they outlive the layer. Empty
+when the shim has never been installed.
+
+## unwrapt.on_resolve
+
+```python
+unwrapt.on_resolve(callback: Callable[[Resolution], object]) -> Callable[[], None]
+```
+
+Call `callback` each time a deferred proxy resolves, with a
+`Resolution`. It runs in the thread that used the proxy, once the
+module is imported. Subscribing costs nothing until a proxy resolves,
+and then one call per subscriber. An exception from a callback is
+never raised into the code that used the proxy: it is reported on
+stderr as a `RuntimeWarning`, and the next callback still runs.
+Returns a function that unsubscribes the callback; calling it again
+does nothing.
+
+The profile recorder, when it sits above the shim, records each
+resolve as well: see [profile mode](profile-mode.md).
+
 ## unwrapt.find_config
 
 ```python
@@ -190,6 +222,42 @@ unwrapt.Installed(*, defer: bool, profile: bool)
 
 Which layers are installed, as a frozen dataclass: `defer` is the
 shim and `profile` the recorder.
+
+## unwrapt.Deferral
+
+```python
+unwrapt.Deferral(*, importer: str | None, module: str, resolved: bool)
+```
+
+One proxy the shim handed out, as a frozen dataclass snapshot:
+`importer` is the `__name__` of the module whose statement was
+deferred, or None, `module` the full dotted name it imports, and
+`resolved` whether the proxy has been used.
+
+## unwrapt.Resolution
+
+```python
+unwrapt.Resolution(
+    *,
+    importer: str | None,
+    module: str,
+    load_ms: float,
+    loaded: bool,
+    thread: threading.Thread,
+    used_in: str | None,
+    file: str | None,
+    line: int | None,
+)
+```
+
+A deferred proxy resolving, as a frozen dataclass. `importer` and
+`module` say which deferral resolved. `load_ms` is the wall time the
+import took, and `loaded` whether it loaded the module or found it
+already loaded by something else. `thread` is the thread that used the
+proxy, so a server can tie the resolution to the request that caused
+it. `used_in`, `file` and `line` locate the code that used it first:
+the module's `__name__`, the file and the line, each None when
+unknown.
 
 ## unwrapt.ConfigError
 

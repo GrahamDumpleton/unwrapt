@@ -31,6 +31,8 @@
             "already_lazy": false,
             "native_lazy": false,
             "deferred": false,
+            "resolves": null,
+            "used_in": null,
             "other_eager_importers": []
         }
     ],
@@ -47,5 +49,20 @@
     ],
     "by_importer": [
         {"importer": "mypkg.web", "cum_ms": 412.3}
+    ],
+    "deferred_unused": [
+        {"edge": 20, "module": "wave", "importer": "mypkg.client"}
+    ],
+    "deferred_used": [
+        {
+            "edge": 21,
+            "resolution": 30,
+            "module": "decimal",
+            "importer": "mypkg.web",
+            "used_in": "mypkg.web",
+            "line": 41,
+            "load_ms": 12.8,
+            "loaded": true
+        }
     ]
 }

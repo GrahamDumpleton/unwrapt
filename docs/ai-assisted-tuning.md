@@ -30,7 +30,7 @@ method from the assistant's side of the table.
 
 The report the assistant receives has this shape: `schema` (bumped if
 the structure ever changes incompatibly), `unwrapt` and `python`
-(versions), `total_import_ms`, and four sections:
+(versions), `total_import_ms`, and these sections:
 
 - `edges`: one object per import call, with `cum_ms` (the wall time
   of the call, the saving from deferring that line), `self_ms` (the
@@ -42,7 +42,13 @@ the structure ever changes incompatibly), `unwrapt` and `python`
   `from-import`, `dotted-as`, `function-level`, `class-level`),
   `already_lazy`, `native_lazy` (recorded at native reification on
   3.15), `deferred` (handed back as a lazy proxy, in a profile with
-  deferral on), and `other_eager_importers` (the shared note).
+  deferral on), `resolves` and `used_in` (on a `resolve` edge, a
+  deferred import loaded at first use), and `other_eager_importers`
+  (the shared note).
+
+- `deferred_unused` and `deferred_used`: in a profile with deferral
+  on, the deferrals the run never used, and those it used anyway, with
+  where each was first used and what its load cost. Empty otherwise.
 
 - `heavy_modules`: by self time.
 

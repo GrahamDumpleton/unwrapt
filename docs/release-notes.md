@@ -96,3 +96,13 @@ the rest of the documentation, starting with
 - The recorder alone no longer imports wrapt, so an eager profile no
   longer has wrapt and its standard library imports loaded ahead of
   the application.
+
+- **Deferred imports are reported, and so is their resolution.**
+  `unwrapt.deferred()` lists each proxy the shim handed out, with
+  whether it has been resolved, and `unwrapt.on_resolve(callback)`
+  calls back with a `Resolution` (importer, module, load time, thread
+  and where it was first used) when one resolves. A profile with
+  deferral on records each resolve as a `resolve` edge, with the
+  module's own imports nested beneath it, and the report gains two
+  sections: deferred but used anyway, and deferred and never used. See
+  [reading the report](reading-the-report.md#deferral-sections).

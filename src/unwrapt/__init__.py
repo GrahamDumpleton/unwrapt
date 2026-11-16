@@ -36,7 +36,7 @@ __version__ = _format_version(__version_info__)
 
 import sys
 
-from unwrapt._compat import installed_layers, is_installed
+from unwrapt._compat import installed_layers, is_installed, subscribe
 
 # The configuration API is typed for checkers through this block, which
 # never runs. TYPE_CHECKING is defined here rather than imported from
@@ -46,40 +46,44 @@ from unwrapt._compat import installed_layers, is_installed
 TYPE_CHECKING = False
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
+
     from unwrapt._config import (
         Config,
         ConfigError,
-        Installed,
         ProfileOptions,
         find_config,
         load_config,
     )
+    from unwrapt._records import Deferral, Installed, Resolution
     from unwrapt._report import Report
 
-# The configuration API lives in unwrapt._config, which pulls in
-# dataclasses and more, so it is loaded on first access through the
-# module __getattr__ below rather than here: importing unwrapt must
-# stay inert.
+# The configuration API lives in unwrapt._config and the record types
+# in unwrapt._records, both of which pull in dataclasses and more, so
+# they are loaded on first access through the module __getattr__ below
+# rather than here: importing unwrapt must stay inert.
 
-_CONFIG_NAMES = frozenset(
-    {
-        "Config",
-        "ConfigError",
-        "Installed",
-        "ProfileOptions",
-        "find_config",
-        "load_config",
-    }
-)
+_LAZY_NAMES = {
+    "Config": "unwrapt._config",
+    "ConfigError": "unwrapt._config",
+    "ProfileOptions": "unwrapt._config",
+    "find_config": "unwrapt._config",
+    "load_config": "unwrapt._config",
+    "Deferral": "unwrapt._records",
+    "Installed": "unwrapt._records",
+    "Resolution": "unwrapt._records",
+}
 
 
 def __getattr__(name: str) -> object:
-    """Load the configuration API on first access."""
+    """Load the configuration API and the record types on first access."""
 
-    if name in _CONFIG_NAMES:
-        from unwrapt import _config
+    module_name = _LAZY_NAMES.get(name)
 
-        return getattr(_config, name)
+    if module_name is not None:
+        import importlib
+
+        return getattr(importlib.import_module(module_name), name)
 
     raise AttributeError(f"module 'unwrapt' has no attribute {name!r}")
 
@@ -132,9 +136,17 @@ def install(
         shim_local = shim.local if shim is not None else None
 
     if profile:
-        from unwrapt._profile import install_profile
+        from unwrapt import _profile
 
-        install_profile(config, shim_local)
+        _profile.install_profile(config, shim_local)
+
+        # The recorder also times each deferred proxy's resolve, so the
+        # imports a deferred module makes when it loads nest beneath it.
+
+        recorder = _profile.current()
+
+        if shim_local is not None and recorder is not None:
+            _hook.set_tracer(recorder)
 
     return is_installed()
 
@@ -236,24 +248,66 @@ def installed() -> "Installed | None":
     if not (defer or profile):
         return None
 
-    from unwrapt._config import Installed
+    from unwrapt._records import Installed
 
     return Installed(defer=defer, profile=profile)
+
+
+def deferred() -> "list[Deferral]":
+    """List each lazy proxy the shim has handed out in this process.
+
+    Each Deferral gives the importer, the module and whether the proxy
+    has been resolved. It needs no recording, so a server can log what
+    was deferred, and what of it was loaded anyway, with only deferral
+    on. Proxies handed out before uninstall() are still listed. Empty
+    when the shim has never been installed.
+    """
+
+    hook_module = sys.modules.get("unwrapt._hook")
+
+    if hook_module is None:
+        return []
+
+    result: list[Deferral] = hook_module.deferred()
+
+    return result
+
+
+def on_resolve(callback: "Callable[[Resolution], object]") -> "Callable[[], None]":
+    """Call callback each time a deferred proxy resolves.
+
+    The callback receives a Resolution: the importer, the module, the
+    time the load took, whether it loaded the module or found it
+    already loaded, the thread, and where the proxy was first used. It
+    runs in the thread that used the proxy, after the module is
+    imported. It costs nothing until a proxy resolves, and then one
+    call per subscriber. An exception from a callback is never raised
+    into the code that used the proxy: it is reported as a
+    RuntimeWarning on stderr.
+
+    Returns a function that unsubscribes the callback.
+    """
+
+    return subscribe(callback)
 
 
 __all__ = [
     "Config",
     "ConfigError",
+    "Deferral",
     "Installed",
     "ProfileOptions",
+    "Resolution",
     "__version__",
     "__version_info__",
+    "deferred",
     "find_config",
     "install",
     "install_from_env",
     "installed",
     "is_installed",
     "load_config",
+    "on_resolve",
     "stop_profile",
     "uninstall",
 ]

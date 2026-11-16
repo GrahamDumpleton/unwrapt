@@ -32,6 +32,41 @@ On Python 3.15 runs with native lazy imports, a warning block follows
 the header explaining the edges recorded at first use; see
 [Python 3.15](python-3-15.md).
 
+## Deferral sections
+
+A profile with deferral on, the recorder above the shim, has two more
+sections after the header, telling whether each deferral paid off:
+
+```
+Deferred but used anyway: loaded during the run, so not a saving
+  load ms  module   deferred in  first used in  line
+     12.8  decimal  mypkg.web    mypkg.web        41
+
+Deferred and never used: deferred for the whole run
+  module  deferred in
+  wave    mypkg.client
+```
+
+- **Deferred but used anyway** lists each deferred import the run went
+  on to use, costliest first: the module, the importer whose statement
+  was deferred, the module and line that used it first, and what its
+  load cost there. `(loaded)` in place of the cost means something else
+  had already loaded the module by then. Each is also a `resolve` edge
+  in the JSON, with the imports the module made nested beneath it, so
+  its cost still counts in the total, the heavy modules and the
+  chains. It is not a candidate row: the statement is already
+  deferred.
+
+- **Deferred and never used** lists the deferrals the run never
+  touched. These are the savings, but what each would have cost is
+  known only from a profile with nothing deferred, so the report
+  names them and leaves the figure to the compare tool:
+  `python -m unwrapt.report eager.json --compare deferred.json`.
+
+Both describe the profiled run only: a deferred import used after
+`unwrapt.stop_profile()`, or never used before the report was
+written, shows as never used.
+
 ## Candidates
 
 Module-level imports the run loaded, ranked by cumulative time:
@@ -130,12 +165,17 @@ The shape:
 :language: json
 ```
 
-Each edge carries `deferrable.native` and `deferrable.unwrapt`
-(booleans), `unwrapt_limit` (the footnote reason, or null),
-`already_lazy`, `native_lazy` (recorded at native reification on
-3.15), `deferred` (handed back as a lazy proxy by the shim, in a
-profile with deferral on), `other_eager_importers` (the shared note), the `parent_id`
-linking it into the tree, and the timings. The `ai-assisted-tuning`
+Each edge carries `kind` (`import`, `from`, or `resolve` for a
+deferred import loaded at first use), `deferrable.native` and
+`deferrable.unwrapt` (booleans), `unwrapt_limit` (the footnote reason,
+or null), `already_lazy`, `native_lazy` (recorded at native
+reification on 3.15), `deferred` (handed back as a lazy proxy by the
+shim, in a profile with deferral on), `resolves` and `used_in` (on a
+resolve edge, the id of the deferred edge it resolves and the module
+that used the proxy first), `other_eager_importers` (the shared
+note), the `parent_id` linking it into the tree, and the timings. The
+`deferred_unused` and `deferred_used` lists are the two deferral
+sections, empty for a run with deferral off. The `ai-assisted-tuning`
 page describes the same fields as an assistant sees them.
 
 ## Limits of this report

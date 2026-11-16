@@ -68,6 +68,8 @@ class EdgeRecord(TypedDict):
     already_lazy: bool
     native_lazy: bool
     deferred: bool
+    resolves: int | None
+    used_in: str | None
     other_eager_importers: list[str]
 
 
@@ -85,6 +87,27 @@ class Chain(TypedDict):
     self_ms: float
     links: list[int]
     best_cut: int | None
+
+
+class DeferredUnused(TypedDict):
+    """A deferred import the profiled run never used."""
+
+    edge: int
+    module: str
+    importer: str | None
+
+
+class DeferredUsed(TypedDict):
+    """A deferred import the profiled run used, and so loaded anyway."""
+
+    edge: int | None
+    resolution: int
+    module: str
+    importer: str | None
+    used_in: str | None
+    line: int | None
+    load_ms: float
+    loaded: bool
 
 
 class ByImporter(TypedDict):
@@ -124,6 +147,8 @@ class Report(TypedDict):
     heavy_modules: list[HeavyModule]
     chains: list[Chain]
     by_importer: list[ByImporter]
+    deferred_unused: list[DeferredUnused]
+    deferred_used: list[DeferredUsed]
 
 
 @dataclass(frozen=True)
@@ -131,22 +156,27 @@ class Edge:
     """One recorded import call.
 
     kind is "import" or "from" depending on whether the call had a
-    fromlist; level_name is "module", "function" or "class" for where
-    the statement sits. already_lazy marks an import that is already
-    declared deferred, by __lazy_modules__, by the external
-    configuration, or natively on Python 3.15; native_lazy is the
+    fromlist, or "resolve" for a deferred import being resolved at
+    first use, in a run with deferral on; level_name is "module",
+    "function" or "class" for where the statement sits. already_lazy
+    marks an import that is already declared deferred, by
+    __lazy_modules__, by the external configuration, or natively on
+    Python 3.15; native_lazy is the
     Python 3.15 case, an import recorded at native reification rather
     than at its statement. deferred marks an import the shim below the
-    recorder handed back as a lazy proxy, in a run with deferral on.
-    file and line locate the statement for the dotted-as check and are
-    not part of the JSON report.
+    recorder handed back as a lazy proxy, in a run with deferral on. A
+    resolve edge carries in resolves the id of the deferred edge it
+    resolves, when the recorder saw that deferral, and in used_in the
+    module that used the proxy first; its line is the line of that
+    first use. file and line locate the statement for the dotted-as
+    check, and file is not part of the JSON report.
     """
 
     id: int
     parent_id: int | None
     importer: str | None
     imported: str
-    kind: Literal["import", "from"]
+    kind: Literal["import", "from", "resolve"]
     level_name: Literal["module", "function", "class"]
     line: int | None
     file: str | None
@@ -156,6 +186,8 @@ class Edge:
     native_lazy: bool
     already_lazy: bool
     deferred: bool = False
+    resolves: int | None = None
+    used_in: str | None = None
 
 
 @dataclass(frozen=True)
@@ -228,6 +260,8 @@ def build_report(edges: Sequence[Edge], options: ProfileOptions) -> Report:
         heavy_modules=heavy,
         chains=chains,
         by_importer=by_importer,
+        deferred_unused=_deferred_unused(edges),
+        deferred_used=_deferred_used(edges),
     )
 
 
@@ -281,8 +315,13 @@ def render_text(report: Report) -> str:
             " (PYTHON_LAZY_IMPORTS=normal) and profile again."
         )
 
+    # The deferral sections, for a run with deferral on.
+
+    lines.extend(_render_deferrals(report))
+
     # Candidates: loaded module-level imports, ranked by cumulative
-    # time, never dropped because a route cannot defer them.
+    # time, never dropped because a route cannot defer them. A resolve
+    # edge is not a statement to change, and has its own section.
 
     filters = summary["filters"]
     min_ms = filters["min_ms"]
@@ -302,6 +341,7 @@ def render_text(report: Report) -> str:
         edge
         for edge in edges
         if edge["level"] == "module"
+        and edge["kind"] != "resolve"
         and edge["loaded"]
         and edge["cum_ms"] >= min_ms
         and _under_packages(edge["importer"], packages)
@@ -603,7 +643,8 @@ def _by_importer(classified: Sequence[_Classified]) -> list[ByImporter]:
 
     These are the files to edit first: the sum counts only edges whose
     statement sits in the module itself, never the imports made by the
-    modules it goes on to load.
+    modules it goes on to load, and never the resolve of an import that
+    is already deferred.
     """
 
     by: dict[str, float] = {}
@@ -611,7 +652,12 @@ def _by_importer(classified: Sequence[_Classified]) -> list[ByImporter]:
     for item in classified:
         edge = item.edge
 
-        if edge.loaded and edge.level_name == "module" and edge.importer is not None:
+        if (
+            edge.loaded
+            and edge.level_name == "module"
+            and edge.kind != "resolve"
+            and edge.importer is not None
+        ):
             by[edge.importer] = by.get(edge.importer, 0.0) + edge.cum_ms
 
     return [
@@ -891,8 +937,95 @@ def _edge_record(item: _Classified, other_eager: list[str]) -> EdgeRecord:
         already_lazy=edge.already_lazy,
         native_lazy=edge.native_lazy,
         deferred=edge.deferred,
+        resolves=edge.resolves,
+        used_in=edge.used_in,
         other_eager_importers=other_eager,
     )
+
+
+def _deferred_unused(edges: Sequence[Edge]) -> list[DeferredUnused]:
+    """The deferred edges no resolve edge resolved, in recorded order."""
+
+    resolved = {edge.resolves for edge in edges if edge.resolves is not None}
+
+    return [
+        DeferredUnused(edge=edge.id, module=edge.imported, importer=edge.importer)
+        for edge in sorted(edges, key=lambda edge: edge.id)
+        if edge.deferred and edge.id not in resolved
+    ]
+
+
+def _deferred_used(edges: Sequence[Edge]) -> list[DeferredUsed]:
+    """The resolve edges, costliest first, with where each was used."""
+
+    resolves = [edge for edge in edges if edge.kind == "resolve"]
+    resolves.sort(key=lambda edge: (-edge.cum_ms, edge.id))
+
+    return [
+        DeferredUsed(
+            edge=edge.resolves,
+            resolution=edge.id,
+            module=edge.imported,
+            importer=edge.importer,
+            used_in=edge.used_in,
+            line=edge.line,
+            load_ms=edge.cum_ms,
+            loaded=edge.loaded,
+        )
+        for edge in resolves
+    ]
+
+
+def _render_deferrals(report: Report) -> list[str]:
+    """The two deferral sections of the text report.
+
+    Shown only for a run with deferral on. A saved report from before
+    these sections existed has neither key, and shows neither.
+    """
+
+    unused = report.get("deferred_unused", [])
+    used = report.get("deferred_used", [])
+
+    if not unused and not used:
+        return []
+
+    lines = [""]
+    lines.append("Deferred but used anyway: loaded during the run, so not a saving")
+
+    table = [["load ms", "module", "deferred in", "first used in", "line"]]
+
+    for entry in used:
+        table.append(
+            [
+                _ms(entry["load_ms"]) if entry["loaded"] else "(loaded)",
+                entry["module"],
+                _name(entry["importer"]),
+                _name(entry["used_in"]),
+                str(entry["line"]) if entry["line"] is not None else "",
+            ]
+        )
+
+    lines.extend(_table(table, [False, True, True, True, False]))
+
+    lines.append("")
+    lines.append("  (loaded) means something else had already loaded the module.")
+
+    lines.append("")
+    lines.append("Deferred and never used: deferred for the whole run")
+
+    table = [["module", "deferred in"]]
+
+    for unused_entry in unused:
+        table.append([unused_entry["module"], _name(unused_entry["importer"])])
+
+    lines.extend(_table(table, [True, True]))
+
+    lines.append("")
+    lines.append("  What each would have cost is known only from a profile with")
+    lines.append("  nothing deferred. To see the saving, compare against one:")
+    lines.append("  python -m unwrapt.report EAGER.json --compare THIS.json")
+
+    return lines
 
 
 _LIMITS = [
@@ -933,7 +1066,13 @@ def _edge(report: Report, edge_id: int | None) -> EdgeRecord | None:
 def _who(edge: EdgeRecord) -> str:
     """The importer column: its module name or a placeholder."""
 
-    return edge["importer"] if edge["importer"] is not None else "<unknown>"
+    return _name(edge["importer"])
+
+
+def _name(module: str | None) -> str:
+    """A module name for display, or a placeholder when it is unknown."""
+
+    return module if module is not None else "<unknown>"
 
 
 def _native_cell(edge: EdgeRecord) -> str:

@@ -23,18 +23,103 @@ installed.
 
 import builtins
 import importlib
+import os
 import sys
 import threading
+import time
 import types
+import warnings
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
-from typing import cast
+from typing import Protocol, cast
 
 import wrapt
 
-from unwrapt._compat import has_native_lazy_imports, mark_defer
+import unwrapt
+from unwrapt._compat import has_native_lazy_imports, mark_defer, resolve_subscribers
 from unwrapt._config import Config, is_candidate, is_native_pending
+from unwrapt._records import Deferral, Resolution
 
 ImportFunction = Callable[..., types.ModuleType]
+
+# Frames in these directories are wrapt's proxy machinery or unwrapt's
+# own, and are skipped when looking for the code that used a proxy.
+
+_MACHINERY = (
+    os.path.dirname(wrapt.__file__) + os.sep,
+    os.path.dirname(unwrapt.__file__) + os.sep,
+)
+
+
+class DeferralRecord:
+    """The shim's own record of one proxy it handed out.
+
+    Mutable, unlike the Deferral snapshots deferred() returns: resolved
+    is set when the proxy is first used. The record is also the token
+    the recorder uses to tie the deferred edge to its resolution.
+    """
+
+    __slots__ = ("importer", "module", "resolved")
+
+    def __init__(self, importer: str | None, module: str) -> None:
+        self.importer = importer
+        self.module = module
+        self.resolved = False
+
+
+class ResolveTracer(Protocol):
+    """What the recorder provides to time a resolve as an import call.
+
+    begin_resolve() runs before the deferred module is imported and
+    returns a token, or None to record nothing. end_resolve() runs after
+    it, with the resolution, or None when the import raised, so the
+    imports the module makes nest beneath its resolution in the tree.
+    """
+
+    def begin_resolve(self) -> object | None: ...
+
+    def end_resolve(
+        self,
+        token: object,
+        record: DeferralRecord,
+        resolution: Resolution | None,
+    ) -> None: ...
+
+
+# Every proxy any shim layer has handed out, in order. Kept across
+# uninstall(), since the proxies themselves outlive the layer.
+
+_deferrals: list[DeferralRecord] = []
+
+# The recorder installed over the shim, when there is one.
+
+_tracer: ResolveTracer | None = None
+
+
+def deferred() -> list[Deferral]:
+    """A snapshot of every proxy handed out, and whether it resolved."""
+
+    return [
+        Deferral(
+            importer=record.importer,
+            module=record.module,
+            resolved=record.resolved,
+        )
+        for record in list(_deferrals)
+    ]
+
+
+def tracer() -> ResolveTracer | None:
+    """The recorder timing resolves, or None."""
+
+    return _tracer
+
+
+def set_tracer(value: ResolveTracer | None) -> None:
+    """Set or clear the recorder that times resolves."""
+
+    global _tracer
+
+    _tracer = value
 
 
 class Shim:
@@ -43,9 +128,9 @@ class Shim:
     config is None once the layer is taken out, which turns its hook
     into plain pass-through. next_import is the import function the
     layer chains to. local carries the deferred flag the recorder reads:
-    the hook sets local.deferred when it hands back a proxy, so a
-    recorder installed over the shim marks that edge as deferred
-    rather than guessing from the result.
+    the hook sets local.deferred to the proxy's DeferralRecord when it
+    hands one back, so a recorder installed over the shim marks that
+    edge as deferred rather than guessing from the result.
     """
 
     __slots__ = ("config", "hook", "local", "next_import")
@@ -234,16 +319,22 @@ def _make_hook(shim: Shim) -> ImportFunction:
                     importer = globals.get("__name__", "<unknown>")
                     print(f"unwrapt: deferring {name!r} in {importer}", file=sys.stderr)
 
-                local.deferred = True
+                record = DeferralRecord(_importer_name(globals), name)
+                _deferrals.append(record)
+                local.deferred = record
 
-                return _make_proxy(name, globals)
+                return _make_proxy(name, globals, record)
 
         return next_import(name, globals, locals, fromlist, level)
 
     return _lazy_aware_import
 
 
-def _make_proxy(name: str, caller_globals: Mapping[str, object]) -> types.ModuleType:
+def _make_proxy(
+    name: str,
+    caller_globals: Mapping[str, object],
+    record: DeferralRecord,
+) -> types.ModuleType:
     """Build the lazy proxy handed back for a deferred import.
 
     The proxy stands in for the top-level package the statement binds:
@@ -255,6 +346,12 @@ def _make_proxy(name: str, caller_globals: Mapping[str, object]) -> types.Module
     The real import goes through importlib.import_module, which does
     not pass through builtins.__import__, so resolving a proxy can
     never be deferred again by the hook, on any Python version.
+
+    The resolve marks the record resolved and, when anything listens,
+    times the import and reports it: to the recorder, which records
+    it as an edge with the imports it makes nested beneath, and to the
+    on_resolve() subscribers. With nothing listening, it costs one
+    timer read on each side of the import.
 
     The proxy presents as the module it stands in for. wrapt's own
     stubs type it honestly as LazyObjectProxy[ModuleType], not a
@@ -270,7 +367,31 @@ def _make_proxy(name: str, caller_globals: Mapping[str, object]) -> types.Module
     mutable_globals = cast(MutableMapping[str, object], caller_globals)
 
     def resolve() -> types.ModuleType:
-        importlib.import_module(name)
+        loaded = name not in sys.modules
+        timing = _tracer
+        token = timing.begin_resolve() if timing is not None else None
+        start = time.perf_counter()
+
+        try:
+            importlib.import_module(name)
+        except BaseException:
+            if timing is not None and token is not None:
+                timing.end_resolve(token, record, None)
+
+            raise
+
+        load_ms = (time.perf_counter() - start) * 1000.0
+        record.resolved = True
+
+        subscribers = resolve_subscribers()
+
+        if subscribers or token is not None:
+            resolution = _resolution(record, load_ms, loaded)
+
+            if timing is not None and token is not None:
+                timing.end_resolve(token, record, resolution)
+
+            _notify(subscribers, resolution)
 
         module = sys.modules[name.partition(".")[0]]
 
@@ -292,3 +413,67 @@ def _make_proxy(name: str, caller_globals: Mapping[str, object]) -> types.Module
     proxy = wrapt.LazyObjectProxy(resolve, interface=types.ModuleType)
 
     return cast(types.ModuleType, proxy)
+
+
+def _importer_name(globals: Mapping[str, object]) -> str | None:
+    """The __name__ of the importing module, when it has one."""
+
+    importer = globals.get("__name__")
+
+    return importer if isinstance(importer, str) else None
+
+
+def _resolution(record: DeferralRecord, load_ms: float, loaded: bool) -> Resolution:
+    """Describe a resolve, including where the proxy was first used.
+
+    The site of first use is the first frame outside wrapt's proxy
+    machinery and unwrapt's own code, which wrapt calls the resolve
+    from when the proxy is touched.
+    """
+
+    used_in: str | None = None
+    file: str | None = None
+    line: int | None = None
+
+    frame: types.FrameType | None = sys._getframe(1)
+
+    while frame is not None and frame.f_code.co_filename.startswith(_MACHINERY):
+        frame = frame.f_back
+
+    if frame is not None:
+        name = frame.f_globals.get("__name__")
+        used_in = name if isinstance(name, str) else None
+        file = frame.f_code.co_filename
+        line = frame.f_lineno
+
+    return Resolution(
+        importer=record.importer,
+        module=record.module,
+        load_ms=load_ms,
+        loaded=loaded,
+        thread=threading.current_thread(),
+        used_in=used_in,
+        file=file,
+        line=line,
+    )
+
+
+def _notify(
+    subscribers: Sequence[Callable[..., object]], resolution: Resolution
+) -> None:
+    """Call each on_resolve() subscriber, never raising into the caller.
+
+    The code that used the proxy must see only the import's own
+    outcome, so an exception from a callback is reported as a warning
+    on stderr and the next callback still runs.
+    """
+
+    for callback in subscribers:
+        try:
+            callback(resolution)
+        except Exception as exc:
+            warnings.warn(
+                f"unwrapt: on_resolve callback {callback!r} raised {exc!r}",
+                RuntimeWarning,
+                stacklevel=2,
+            )
