@@ -2,8 +2,8 @@
 
 unwrapt has two kinds of setting. A configuration file says what to
 defer and how a profile report is written. Environment variables,
-read by the [autowrapt](autowrapt.md) bootstrap, switch profiling on
-and override the file's values. Everything is optional: with no file
+read by the [autowrapt](autowrapt.md) bootstrap, switch deferral and
+profiling on and off and override the file's values. Everything is optional: with no file
 and no variables, unwrapt applies each module's own
 `__lazy_modules__` below Python 3.15 and nothing else.
 
@@ -133,8 +133,10 @@ must never stop the host application from starting. Code that calls
 
 ## Environment variables
 
-The [autowrapt](autowrapt.md) bootstrap, and `unwrapt.install()`
-called with no arguments, read these. All of them are optional, and an
+The [autowrapt](autowrapt.md) bootstrap, through
+`unwrapt.install_from_env()`, reads these. `unwrapt.install()` reads
+none of them except `UNWRAPT_CONFIG`, when it is given no
+configuration and finds the file itself. All of them are optional, and an
 invalid value warns once on stderr and is ignored, leaving the file's
 value or the default in place.
 
@@ -148,6 +150,16 @@ or `unwrapt.install_from_env()`, described on the [API](api.md) page,
 and importing the package is always inert.
 
 ### Shim mode
+
+`UNWRAPT_DEFER` = 1 | 0
+
+: Whether the shim defers. The default is off when `UNWRAPT_PROFILE`
+is set and on otherwise. Naming unwrapt in `AUTOWRAPT_BOOTSTRAP` is
+the opt-in to deferral, which is why it is on when not profiling,
+while `UNWRAPT_PROFILE=1` alone is the eager profile that finds what
+is worth deferring. `UNWRAPT_PROFILE=1` with `UNWRAPT_DEFER=1`
+profiles the program with its deferrals in place, the recorder above
+the shim. `UNWRAPT_DEFER=0` alone installs nothing.
 
 `UNWRAPT_CONFIG` = *path*
 
@@ -170,10 +182,8 @@ report. The variables:
 
 `UNWRAPT_PROFILE` = 1
 
-: Enable profile mode: install the recording hook instead of the
-shim hook. No deferral happens. The two modes are mutually exclusive
-in one process, by design: profiling an already-deferred program
-measures something different.
+: Enable profile mode: install the recording hook. On its own it
+gives an eager profile, with no deferral, for finding candidates.
 
 `UNWRAPT_PROFILE_OUTPUT` = *path*
 

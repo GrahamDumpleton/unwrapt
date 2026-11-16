@@ -1,4 +1,4 @@
-"""Shim mode: the lazy-aware replacement for builtins.__import__.
+"""The shim: the lazy-aware replacement for builtins.__import__.
 
 Below Python 3.15 the hook emulates PEP 810's __lazy_modules__ for
 whole-module imports: it replaces builtins.__import__ with a plain
@@ -10,33 +10,62 @@ wrappers installed before unwrapt keep working. From Python 3.15 the
 interpreter handles __lazy_modules__ natively and the hook's only job
 is the configuration's lazy_modules, in external-config-only mode:
 it installs nothing when there are no entries.
+
+Each install builds a new layer, with its own reference to the import
+function it chains to. A layer that cannot be taken out because
+something else wrapped builtins.__import__ over it is turned into
+plain pass-through instead, and stays correct in the chain whatever
+is installed later.
+
+This module imports wrapt, so it is imported only when the shim is
+installed.
 """
 
 import builtins
 import importlib
 import sys
+import threading
 import types
 from collections.abc import Callable, Mapping, MutableMapping, Sequence
 from typing import cast
 
 import wrapt
 
-from unwrapt._compat import (
-    has_native_lazy_imports,
-    is_installed,
-    mark_installed,
-)
+from unwrapt._compat import has_native_lazy_imports, mark_defer
 from unwrapt._config import Config, is_candidate, is_native_pending
 
-# The import function that was installed when the hook went in. Every
-# non-deferred call chains to it, so import wrappers installed before
-# unwrapt (APM agents, coverage tools, anything else) keep working.
+ImportFunction = Callable[..., types.ModuleType]
 
-_original_import: Callable[..., types.ModuleType] | None = None
 
-# The configuration the hook was installed with.
+class Shim:
+    """One installed shim layer.
 
-_config: Config | None = None
+    config is None once the layer is taken out, which turns its hook
+    into plain pass-through. next_import is the import function the
+    layer chains to. local carries the deferred flag the recorder reads:
+    the hook sets local.deferred when it hands back a proxy, so a
+    recorder installed over the shim marks that edge as deferred
+    rather than guessing from the result.
+    """
+
+    __slots__ = ("config", "hook", "local", "next_import")
+
+    def __init__(self, config: Config, next_import: ImportFunction) -> None:
+        self.config: Config | None = config
+        self.next_import = next_import
+        self.local = threading.local()
+        self.hook: ImportFunction = _make_hook(self)
+
+
+# The shim layer currently installed, or None.
+
+_current: Shim | None = None
+
+
+def current() -> Shim | None:
+    """The shim layer currently installed, or None."""
+
+    return _current
 
 
 def install_shim(config: Config) -> bool:
@@ -48,18 +77,18 @@ def install_shim(config: Config) -> bool:
     restricts it to lazy_modules alone. From Python 3.15 the
     interpreter already handles __lazy_modules__, so the hook runs in
     external-config-only mode and defers only what lazy_modules
-    names; with no entries there is nothing for
-    unwrapt to do, so nothing is installed. That case is not a warning:
-    running the bootstrap on 3.15 with no configuration is a normal,
-    harmless setup.
+    names; with no entries there is nothing for unwrapt to do, so
+    nothing is installed. That case is not a warning: running the
+    bootstrap on 3.15 with no configuration is a normal, harmless
+    setup.
 
-    Returns True when this call installed the hook, False when a hook
-    was already installed or there was nothing to install.
+    Returns True when this call installed the hook, False when the
+    shim was already installed or there was nothing to install.
     """
 
-    global _original_import, _config
+    global _current
 
-    if is_installed():
+    if _current is not None:
         return False
 
     if has_native_lazy_imports() and not config.lazy_modules:
@@ -73,10 +102,10 @@ def install_shim(config: Config) -> bool:
 
         return False
 
-    _config = config
-    _original_import = builtins.__import__
-    builtins.__import__ = _lazy_aware_import
-    mark_installed("shim")
+    shim = Shim(config, builtins.__import__)
+    builtins.__import__ = shim.hook
+    _current = shim
+    mark_defer(True)
 
     if config.debug:
         if has_native_lazy_imports():
@@ -91,79 +120,127 @@ def install_shim(config: Config) -> bool:
     return True
 
 
-def _lazy_aware_import(
-    name: str,
-    globals: Mapping[str, object] | None = None,
-    locals: Mapping[str, object] | None = None,
-    fromlist: Sequence[str] | None = (),
-    level: int = 0,
-) -> types.ModuleType:
-    """The shim hook: return a lazy proxy for a deferred import.
+def uninstall_shim() -> bool:
+    """Take the shim out, or turn it into pass-through.
 
-    An import is a deferral candidate only when the whole-module rules
-    hold, cheapest checks first so the common pass-through path stays
-    cheap:
+    The import function the shim replaced is put back only when the
+    shim is still the current builtins.__import__; otherwise something
+    was installed over it, and removing the shim would remove that too,
+    so the shim stays in the chain passing every call straight through.
+    Proxies already handed out keep working: their resolve does not go
+    through the hook.
 
-    - level is 0: an absolute import.
-
-    - fromlist is empty: a whole-module import. The eval loop passes
-      None for a plain `import x` (and a tuple for `from x import y`),
-      so emptiness rather than identity is the test, and a call made
-      from Python with the argument omitted arrives as () which is
-      empty too.
-
-    - globals is not None, and locals is globals: a module level
-      statement. Function bodies pass None for locals and class bodies
-      pass the class namespace, so neither is deferred.
-
-    - the module is not already in sys.modules: there is nothing left
-      to defer.
-
-    - the import is a candidate: named in the importing module's
-      __lazy_modules__ or in the configuration's lazy_modules, per
-      the version rules of the configuration module.
-
-    One further rule applies on Python 3.15 and later, before the
-    candidate check: a name with a pending native lazy binding is
-    native's business and passes through. A __lazy_modules__ entry
-    only reaches the hook at all when native reifies it, at first
-    use, and deferring that call would hand native a lazy proxy
-    where it expects the real module, so the hook recognises the
-    reification by the pending binding in sys.lazy_modules and
-    chains through. An explicit `lazy import` statement leaves no
-    registry entry, so a config entry that duplicates one is not
-    detectable; the documentation says not to write those.
-
-    Everything else chains unchanged to the import function the hook
-    replaced, so an import never behaves differently merely because
-    unwrapt is installed.
+    Returns True when a shim was installed.
     """
 
-    if (
-        _config is not None
-        and level == 0
-        and not fromlist
-        and globals is not None
-        and locals is globals
-        and name not in sys.modules
-    ):
-        if has_native_lazy_imports() and is_native_pending(name):
-            if _config.debug:
-                importer = globals.get("__name__", "<unknown>")
-                print(
-                    f"unwrapt: leaving {name!r} in {importer} to native lazy imports",
-                    file=sys.stderr,
-                )
-        elif is_candidate(name, globals, _config):
-            if _config.debug:
-                importer = globals.get("__name__", "<unknown>")
-                print(f"unwrapt: deferring {name!r} in {importer}", file=sys.stderr)
+    global _current
 
-            return _make_proxy(name, globals)
+    shim = _current
 
-    assert _original_import is not None
+    if shim is None:
+        return False
 
-    return _original_import(name, globals, locals, fromlist, level)
+    shim.config = None
+
+    if builtins.__import__ is shim.hook:
+        builtins.__import__ = shim.next_import
+
+    _current = None
+    mark_defer(False)
+
+    return True
+
+
+def _make_hook(shim: Shim) -> ImportFunction:
+    """Build the import hook function for one shim layer.
+
+    The hook is a closure over the layer rather than a bound method, so
+    the eval loop calls a plain function and the importing frame stays
+    exactly one level up.
+    """
+
+    next_import = shim.next_import
+    local = shim.local
+
+    def _lazy_aware_import(
+        name: str,
+        globals: Mapping[str, object] | None = None,
+        locals: Mapping[str, object] | None = None,
+        fromlist: Sequence[str] | None = (),
+        level: int = 0,
+    ) -> types.ModuleType:
+        """The shim hook: return a lazy proxy for a deferred import.
+
+        An import is a deferral candidate only when the whole-module
+        rules hold, cheapest checks first so the common pass-through
+        path stays cheap:
+
+        - level is 0: an absolute import.
+
+        - fromlist is empty: a whole-module import. The eval loop
+          passes None for a plain `import x` (and a tuple for
+          `from x import y`), so emptiness rather than identity is the
+          test, and a call made from Python with the argument omitted
+          arrives as () which is empty too.
+
+        - globals is not None, and locals is globals: a module level
+          statement. Function bodies pass None for locals and class
+          bodies pass the class namespace, so neither is deferred.
+
+        - the module is not already in sys.modules: there is nothing
+          left to defer.
+
+        - the import is a candidate: named in the importing module's
+          __lazy_modules__ or in the configuration's lazy_modules, per
+          the version rules of the configuration module.
+
+        One further rule applies on Python 3.15 and later, before the
+        candidate check: a name with a pending native lazy binding is
+        native's business and passes through. A __lazy_modules__ entry
+        only reaches the hook at all when native reifies it, at first
+        use, and deferring that call would hand native a lazy proxy
+        where it expects the real module, so the hook recognises the
+        reification by the pending binding in sys.lazy_modules and
+        chains through. An explicit `lazy import` statement leaves no
+        registry entry, so a config entry that duplicates one is not
+        detectable; the documentation says not to write those.
+
+        Everything else chains unchanged to the import function the
+        hook replaced, so an import never behaves differently merely
+        because unwrapt is installed. Once the layer is taken out,
+        config is None and every call chains.
+        """
+
+        config = shim.config
+
+        if (
+            config is not None
+            and level == 0
+            and not fromlist
+            and globals is not None
+            and locals is globals
+            and name not in sys.modules
+        ):
+            if has_native_lazy_imports() and is_native_pending(name):
+                if config.debug:
+                    importer = globals.get("__name__", "<unknown>")
+                    print(
+                        f"unwrapt: leaving {name!r} in {importer} to native"
+                        " lazy imports",
+                        file=sys.stderr,
+                    )
+            elif is_candidate(name, globals, config):
+                if config.debug:
+                    importer = globals.get("__name__", "<unknown>")
+                    print(f"unwrapt: deferring {name!r} in {importer}", file=sys.stderr)
+
+                local.deferred = True
+
+                return _make_proxy(name, globals)
+
+        return next_import(name, globals, locals, fromlist, level)
+
+    return _lazy_aware_import
 
 
 def _make_proxy(name: str, caller_globals: Mapping[str, object]) -> types.ModuleType:

@@ -67,6 +67,7 @@ class EdgeRecord(TypedDict):
     unwrapt_limit: str | None
     already_lazy: bool
     native_lazy: bool
+    deferred: bool
     other_eager_importers: list[str]
 
 
@@ -135,8 +136,10 @@ class Edge:
     declared deferred, by __lazy_modules__, by the external
     configuration, or natively on Python 3.15; native_lazy is the
     Python 3.15 case, an import recorded at native reification rather
-    than at its statement. file and line locate the statement for the
-    dotted-as check and are not part of the JSON report.
+    than at its statement. deferred marks an import the shim below the
+    recorder handed back as a lazy proxy, in a run with deferral on.
+    file and line locate the statement for the dotted-as check and are
+    not part of the JSON report.
     """
 
     id: int
@@ -152,6 +155,7 @@ class Edge:
     self_ms: float
     native_lazy: bool
     already_lazy: bool
+    deferred: bool = False
 
 
 @dataclass(frozen=True)
@@ -886,6 +890,7 @@ def _edge_record(item: _Classified, other_eager: list[str]) -> EdgeRecord:
         unwrapt_limit=item.limit,
         already_lazy=edge.already_lazy,
         native_lazy=edge.native_lazy,
+        deferred=edge.deferred,
         other_eager_importers=other_eager,
     )
 

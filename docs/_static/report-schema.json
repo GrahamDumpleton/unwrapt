@@ -30,6 +30,7 @@
             "unwrapt_limit": "from-import",
             "already_lazy": false,
             "native_lazy": false,
+            "deferred": false,
             "other_eager_importers": []
         }
     ],

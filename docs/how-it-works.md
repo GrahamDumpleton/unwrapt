@@ -7,12 +7,39 @@ covers what it cannot.
 
 ## Activation
 
-`unwrapt.install()` is the switch. It is idempotent, it reads the
-[environment](configuration.md) once to pick the mode, and it never
-installs anything when there is nothing to do. With
-[autowrapt](autowrapt.md) and `AUTOWRAPT_BOOTSTRAP=unwrapt`, the
-callback runs at interpreter startup, before the application's own
-imports; called directly, it takes effect from wherever it was called.
+`unwrapt.install(config, defer=True, profile=False)` is the switch,
+and its two switches are independent layers: `defer` installs the
+shim, and `profile` installs the [profile mode](profile-mode.md)
+recorder. It installs only what it is asked for, never anything when
+there is nothing to do, and nothing at all when unwrapt is already
+installed. With [autowrapt](autowrapt.md) and
+`AUTOWRAPT_BOOTSTRAP=unwrapt`, `unwrapt.install_from_env()` runs at
+interpreter startup, before the application's own imports, and takes
+the switches from the [environment](configuration.md); called
+directly, `install()` takes effect from wherever it was called.
+
+## The layers
+
+The layers stack: the recorder sits above the shim, which sits above
+the import function that was installed before unwrapt. A profile with
+both layers on therefore measures the program with its deferrals in
+place, and each deferred import is recorded as an edge marked
+deferred: the shim sets a thread-local flag when it hands back a
+proxy, so the recorder knows rather than guessing from the result.
+
+`unwrapt.stop_profile()` takes out only the recorder and leaves
+deferral in place, which is how a preforking server stops timing at
+the fork while its workers keep deferring. `unwrapt.uninstall()`
+takes out both. Either way, a layer puts back the import function
+below it only when it is still the current `builtins.__import__`. If
+something has wrapped `builtins.__import__` over unwrapt since, taking
+the layer out would remove that wrapper too, so the layer stays in the
+chain and passes every call straight through instead. Proxies already
+handed out keep working after either call.
+
+The shim, and with it wrapt, is imported only when the shim is
+installed, so the recorder alone never loads wrapt ahead of the
+application.
 
 Importing the unwrapt package itself is inert: no hook, no wrapt
 import, no side effects. The build backend imports it to read the

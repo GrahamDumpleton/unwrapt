@@ -135,9 +135,14 @@ the underlying commands yourself; run `just --list` to see everything.
   the non-deferred path, because every import statement in the process
   passes through it.
 
-- Shim mode and profile mode are mutually exclusive in one process,
-  by design: profiling an already-deferred program measures something
-  different.
+- Deferral (the shim) and recording (the profile recorder) are
+  independent layers. When both are on, the recorder sits above the
+  shim, so the profile measures the program with its deferrals in
+  place; the eager profile for finding candidates has deferral off.
+  Taking a layer out puts back the import function below it only when
+  the layer is still the current `builtins.__import__`; otherwise the
+  layer stays in the chain as pass-through, so unwrapt never removes a
+  wrapper installed over it.
 
 - On Python 3.15 and later, unwrapt never reads a module's own
   `__lazy_modules__` and never alters native behaviour (no calls to

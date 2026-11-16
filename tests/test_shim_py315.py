@@ -16,7 +16,7 @@ SETUP = """
 
         import unwrapt
 
-        installed = unwrapt.install()
+        installed = unwrapt.install_from_env()
         """
 
 
@@ -45,7 +45,7 @@ def test_no_config_produces_no_output() -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
         """,
     )
 
@@ -57,7 +57,7 @@ def test_no_config_debug_line_explains() -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
         """,
         env={"UNWRAPT_DEBUG": "1"},
     )
@@ -181,7 +181,7 @@ def test_debug_states_external_config_only_mode(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
         """,
         env={"UNWRAPT_CONFIG": config, "UNWRAPT_DEBUG": "1"},
     )

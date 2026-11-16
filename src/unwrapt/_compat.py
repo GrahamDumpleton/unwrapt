@@ -12,9 +12,12 @@ import sys
 # PEP 810 lazy imports are provided natively from Python 3.15.
 NATIVE_LAZY_IMPORTS = (3, 15)
 
-# The mode of the hook installed in this process, "shim" or "profile",
-# or None when no hook is installed. Written once, by the installer.
-_installed_mode: str | None = None
+# Which of the two layers are installed in this process: the shim that
+# defers, and the recorder that profiles. Written by the installers and
+# the removers, never by anything else.
+
+_defer_installed = False
+_profile_installed = False
 
 
 def has_native_lazy_imports() -> bool:
@@ -29,28 +32,34 @@ def has_native_lazy_imports() -> bool:
     return sys.version_info >= NATIVE_LAZY_IMPORTS
 
 
-def installed_mode() -> str | None:
-    """Return the mode of the hook installed in this process.
+def installed_layers() -> tuple[bool, bool]:
+    """Whether the shim and the recorder are installed, in that order."""
 
-    "shim" or "profile", or None when no hook is installed.
-    """
-
-    return _installed_mode
+    return _defer_installed, _profile_installed
 
 
 def is_installed() -> bool:
-    """Whether an unwrapt hook is installed in this process."""
+    """Whether an unwrapt layer, the shim or the recorder, is installed."""
 
-    return _installed_mode is not None
+    return _defer_installed or _profile_installed
 
 
-def mark_installed(mode: str) -> None:
-    """Record that a hook of the given mode was installed.
+def mark_defer(installed: bool) -> None:
+    """Record whether the shim is installed.
 
-    The installers call this once, after replacing builtins.__import__,
-    so the flag never says installed for a hook that is not in place.
+    The shim's installer calls this after replacing builtins.__import__
+    and its remover after taking it out, so the flag never says
+    installed for a layer that is not in place.
     """
 
-    global _installed_mode
+    global _defer_installed
 
-    _installed_mode = mode
+    _defer_installed = installed
+
+
+def mark_profile(installed: bool) -> None:
+    """Record whether the recorder is installed, as mark_defer() does."""
+
+    global _profile_installed
+
+    _profile_installed = installed

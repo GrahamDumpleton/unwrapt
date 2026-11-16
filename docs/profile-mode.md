@@ -10,13 +10,15 @@ output.
 ## Running it
 
 Profile mode is activated the same way the shim is: through the
-[autowrapt](autowrapt.md) bootstrap, or an explicit `unwrapt.install()`.
+[autowrapt](autowrapt.md) bootstrap, or an explicit
+`unwrapt.install(profile=True)`.
 
 ```console
 $ AUTOWRAPT_BOOTSTRAP=unwrapt UNWRAPT_PROFILE=1 python -m myapp
 ```
 
-The text report prints to stderr at process exit. The recommended form
+The text report prints to stderr at process exit, or when the
+application calls `unwrapt.stop_profile()` before then. The recommended form
 writes it to a file, in the JSON the tooling consumes:
 
 ```console
@@ -41,12 +43,29 @@ file's value.
 
 ## What it does
 
-Installs a recording `__import__` hook instead of the shim hook. No
-deferral happens, whatever the configuration or the modules'
-`__lazy_modules__` say: profile mode measures the program as it is.
-The two modes are mutually exclusive in one process, by design, and
-`unwrapt.install()` picks profile mode whenever `UNWRAPT_PROFILE` is
-set.
+Installs a recording `__import__` hook. Recording and deferral are
+independent layers, and which runs is the caller's choice:
+
+- **An eager profile**, deferral off, measures the program as it is,
+  whatever the configuration or the modules' `__lazy_modules__` say.
+  This is the profile for finding candidates, and what
+  `UNWRAPT_PROFILE=1` alone gives.
+
+- **A profile with deferral on** puts the recorder above the shim and
+  measures the program with its deferrals in place: what start-up
+  really pays, and which deferred modules are loaded anyway.
+  `UNWRAPT_PROFILE=1` with `UNWRAPT_DEFER=1` gives this one, and so
+  does `unwrapt.install(defer=True, profile=True)`. Each import the
+  shim deferred is an edge marked `deferred`.
+
+The report is written at exit by an exit handler, unless the
+application calls `unwrapt.stop_profile()` first. That takes out only
+the recorder, leaves deferral in place, unregisters the exit handler,
+and returns the report, writing it where the profile options say
+unless asked not to with `write=False`. A preforking server calls it
+at the fork, so the workers neither carry on timing nor inherit the
+exit handler and write a copy of the host's report each. See the
+[API](api.md).
 
 For every import call through the hook, including `sys.modules` cache
 hits, one edge is recorded:
@@ -68,6 +87,12 @@ hits, one edge is recorded:
 
 - the ids linking each edge to the import call it happened inside,
   which is how the report builds the tree and the chains.
+
+A module the shim deferred is loaded later through
+`importlib.import_module`, which does not pass through
+`builtins.__import__`, so its own load is not an edge. The imports that
+module makes do pass through the hook, and are recorded as outermost
+edges, with the module as their importer.
 
 On Python 3.15 and later, native lazy imports are left exactly as
 they are: a declared-lazy import that the run touches is recorded at

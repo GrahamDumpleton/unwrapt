@@ -104,8 +104,9 @@ is the real module: True
 
 This run called `unwrapt.install()` itself, which is the explicit
 activation for when autowrapt is not an option: a test suite, a
-notebook, a single process you control. The install is idempotent, and
-importing unwrapt alone never installs anything.
+notebook, a single process you control. A second call while unwrapt is
+installed does nothing, and importing unwrapt alone never installs
+anything.
 
 ## Deferring an import you cannot edit
 

@@ -58,7 +58,7 @@ def test_baseline_report_structure(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
         """
         + ENTRY_IMPORTS,
         tmp_path,
@@ -118,7 +118,7 @@ def test_config_route_defers_the_decisions(tmp_path: Path) -> None:
 
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
         """
         + ENTRY_IMPORTS
         + """
@@ -174,7 +174,7 @@ def test_compare_tool_reports_the_change(
     prefix = """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
         """
 
     before = _profile(prefix + ENTRY_IMPORTS, tmp_path / "before")

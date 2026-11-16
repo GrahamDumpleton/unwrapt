@@ -36,7 +36,7 @@ __version__ = _format_version(__version_info__)
 
 import sys
 
-from unwrapt._compat import is_installed
+from unwrapt._compat import installed_layers, is_installed
 
 # The configuration API is typed for checkers through this block, which
 # never runs. TYPE_CHECKING is defined here rather than imported from
@@ -49,10 +49,12 @@ if TYPE_CHECKING:
     from unwrapt._config import (
         Config,
         ConfigError,
+        Installed,
         ProfileOptions,
         find_config,
         load_config,
     )
+    from unwrapt._report import Report
 
 # The configuration API lives in unwrapt._config, which pulls in
 # dataclasses and more, so it is loaded on first access through the
@@ -60,7 +62,14 @@ if TYPE_CHECKING:
 # stay inert.
 
 _CONFIG_NAMES = frozenset(
-    {"Config", "ConfigError", "ProfileOptions", "find_config", "load_config"}
+    {
+        "Config",
+        "ConfigError",
+        "Installed",
+        "ProfileOptions",
+        "find_config",
+        "load_config",
+    }
 )
 
 
@@ -75,72 +84,176 @@ def __getattr__(name: str) -> object:
     raise AttributeError(f"module 'unwrapt' has no attribute {name!r}")
 
 
+def install(
+    config: "Config | None" = None,
+    *,
+    defer: bool = True,
+    profile: bool = False,
+) -> bool:
+    """Install unwrapt's import layers for this process.
+
+    What it is given is what happens: it reads no environment variable,
+    except UNWRAPT_CONFIG through load_config() when no config is
+    given. With no config, the configuration comes from load_config(),
+    which raises ConfigError for a file that cannot be used.
+
+    defer and profile are independent. defer installs the shim, which
+    defers the imports marked by each module's own __lazy_modules__
+    and by the configuration's lazy_modules below Python 3.15, and
+    only lazy_modules from 3.15, where it installs nothing when that
+    has no entries. profile installs the recorder, above the shim when
+    both are on, so the profile measures the program with its
+    deferrals in place; with defer off it measures an eager run. The
+    report is written at exit unless stop_profile() is called first.
+
+    Calling it while unwrapt is installed returns False and changes
+    nothing; uninstall() first to install again.
+
+    Returns True when this call installed a layer, False when unwrapt
+    was already installed or there was nothing to install.
+    """
+
+    if is_installed():
+        return False
+
+    if config is None:
+        from unwrapt._config import load_config
+
+        config = load_config()
+
+    shim_local = None
+
+    if defer:
+        from unwrapt import _hook
+
+        _hook.install_shim(config)
+
+        shim = _hook.current()
+        shim_local = shim.local if shim is not None else None
+
+    if profile:
+        from unwrapt._profile import install_profile
+
+        install_profile(config, shim_local)
+
+    return is_installed()
+
+
 def install_from_env() -> bool:
-    """Install the unwrapt import hook as the autowrapt bootstrap does.
+    """Install unwrapt as the autowrapt bootstrap does.
 
     The configuration comes from load_config(), with
     UNWRAPT_CONFIG_ONLY, UNWRAPT_DEBUG and the UNWRAPT_PROFILE_*
-    variables overriding the file's values, and UNWRAPT_PROFILE picks
-    the mode. With UNWRAPT_PROFILE set, the recording hook of profile
-    mode is installed and no deferral happens: the two modes are
-    mutually exclusive in one process. Otherwise the shim hook is
-    installed, subject to the Python version rules described in the
-    documentation: below 3.15 it defers imports marked by the
-    importing module's own __lazy_modules__ and by the configuration's
-    lazy_modules, and from 3.15, where the interpreter handles
-    __lazy_modules__ natively, it applies only lazy_modules and
-    installs nothing when there are no entries.
+    variables overriding the file's values. UNWRAPT_PROFILE sets
+    profile, and UNWRAPT_DEFER sets defer, which defaults to off when
+    UNWRAPT_PROFILE is set and to on otherwise: UNWRAPT_PROFILE=1 alone
+    is an eager profile for finding candidates, and adding
+    UNWRAPT_DEFER=1 profiles the program with its deferrals in place.
+    Then install() does the rest.
 
     Never stops start-up: a configuration file that cannot be used,
     or an invalid environment variable, warns on stderr and is left
     out.
 
-    Returns True when this call installed a hook, False when one was
-    already installed or there was nothing to install.
+    Returns True when this call installed a layer, False when unwrapt
+    was already installed or there was nothing to install.
     """
 
     from unwrapt import _config
-    from unwrapt._hook import install_shim
-    from unwrapt._profile import install_profile
 
     config = _config.config_from_env()
 
     if config.debug and config.path is not None:
         print(f"unwrapt: configuration read from {config.path}", file=sys.stderr)
 
-    if _config.env_flag("UNWRAPT_PROFILE"):
-        return install_profile(config)
+    profile = _config.env_flag("UNWRAPT_PROFILE") is True
+    defer = _config.env_flag("UNWRAPT_DEFER")
 
-    return install_shim(config)
+    if defer is None:
+        defer = not profile
+
+    return install(config, defer=defer, profile=profile)
 
 
-def install(module: object = None) -> bool:
-    """Install the unwrapt import hook for this process.
+def stop_profile(*, write: bool = True) -> "Report | None":
+    """Stop the recorder, leave deferral in place, and return the report.
 
-    Reads the configuration and the mode from the environment exactly
-    as install_from_env() does. Calling install() a second time does
-    nothing, whatever mode was installed first.
+    Only the recorder is taken out: the shim, when installed, carries
+    on deferring. The import function below the recorder is put back
+    only when the recorder is still the current builtins.__import__;
+    otherwise the recorder stays in the chain as plain pass-through, so
+    it never removes a wrapper installed over it. The exit handler that
+    would write the report at exit is unregistered.
 
-    The module argument is ignored. It exists so the function can serve
-    directly as a post import hook callback, which is handed the
-    trigger module and carries no information.
+    With write set, the report also goes where the profile options
+    say: to the output path, or to stderr. A failure to write is
+    reported on stderr, and the report is still returned.
 
-    Returns True when this call installed a hook, False when one was
-    already installed or there was nothing to install.
+    Returns None when no recorder is installed.
     """
 
-    return install_from_env()
+    if not installed_layers()[1]:
+        return None
+
+    from unwrapt._profile import stop_profile as _stop_profile
+
+    return _stop_profile(write)
+
+
+def uninstall() -> bool:
+    """Take out both of unwrapt's layers, and clear the installed state.
+
+    The recorder is stopped without writing its report, then the shim
+    is taken out. Each layer puts back the import function below it
+    only when it is still the current builtins.__import__; otherwise it
+    stays in the chain as plain pass-through, so a wrapper installed
+    over unwrapt is never removed. Proxies already handed out keep
+    working. install() can run again afterwards.
+
+    Returns True when anything was installed.
+    """
+
+    defer, profile = installed_layers()
+
+    if profile:
+        from unwrapt._profile import stop_profile as _stop_profile
+
+        _stop_profile(False)
+
+    if defer:
+        from unwrapt._hook import uninstall_shim
+
+        uninstall_shim()
+
+    return defer or profile
+
+
+def installed() -> "Installed | None":
+    """Which layers are installed, or None when neither is."""
+
+    defer, profile = installed_layers()
+
+    if not (defer or profile):
+        return None
+
+    from unwrapt._config import Installed
+
+    return Installed(defer=defer, profile=profile)
 
 
 __all__ = [
     "Config",
     "ConfigError",
+    "Installed",
     "ProfileOptions",
     "__version__",
     "__version_info__",
     "find_config",
     "install",
     "install_from_env",
+    "installed",
     "is_installed",
     "load_config",
+    "stop_profile",
+    "uninstall",
 ]

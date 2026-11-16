@@ -1,28 +1,45 @@
 # API
 
-The public API is small: the install functions, the configuration
-types, and the version. Everything listed here is importable from the
+The public API is small: the functions that install and remove the
+layers, the configuration types, and the version. Everything listed here is importable from the
 `unwrapt` package itself, and importing it stays inert: the
 configuration types load on first access.
 
 ## unwrapt.install
 
 ```python
-unwrapt.install(module: object = None) -> bool
+unwrapt.install(
+    config: Config | None = None,
+    *,
+    defer: bool = True,
+    profile: bool = False,
+) -> bool
 ```
 
-Install the unwrapt import hook for this process. It reads the
-configuration and the mode exactly as `install_from_env()` does,
-below. Calling it a second time does nothing, whatever mode was
-installed first.
+Install unwrapt's layers for this process. What it is given is what
+happens: it reads no environment variable, except `UNWRAPT_CONFIG`
+when it is given no `config` and finds the file through
+`load_config()`, which raises `ConfigError` for a file that cannot be
+used.
 
-The `module` argument is ignored: it exists so the function can serve
-directly as a post import hook callback, which is handed the trigger
-module and carries no information.
+`defer` installs the shim and `profile` the
+[profile mode](profile-mode.md) recorder, independently:
 
-Returns True when this call installed a hook, False when one was
-already installed or there was nothing to install (Python 3.15 and
-later with no `lazy_modules` entries).
+| `defer` | `profile` | Below 3.15 | 3.15 and later |
+| --- | --- | --- | --- |
+| on | off | The shim: each module's `__lazy_modules__` plus `lazy_modules` | The shim only if `lazy_modules` has entries, else nothing |
+| off | on | A profile with nothing deferred | The same, with native lazy imports measured at first use |
+| on | on | The recorder above the shim: a profile of the program with its deferrals | The same, with the shim only if there are entries |
+| off | off | Nothing | Nothing |
+
+The report of a profile is written at exit, where the configuration's
+`[profile]` options say, unless `stop_profile()` is called first. The
+shim, and with it wrapt, is imported only when the shim is installed.
+
+Calling it while unwrapt is installed returns False and changes
+nothing; `uninstall()` first to install again. Returns True when this
+call installed a layer, False when unwrapt was already installed or
+there was nothing to install.
 
 ## unwrapt.install_from_env
 
@@ -33,15 +50,59 @@ unwrapt.install_from_env() -> bool
 What the [autowrapt](autowrapt.md) bootstrap calls. The configuration
 comes from `load_config()`, with `UNWRAPT_CONFIG_ONLY`,
 `UNWRAPT_DEBUG` and the `UNWRAPT_PROFILE_*` variables overriding the
-file's values, and `UNWRAPT_PROFILE` picks the mode: with it set, the
-recording hook of [profile mode](profile-mode.md); otherwise the shim
-hook, subject to the Python version rules on the
-[how it works](how-it-works.md) page. See
+file's values. `UNWRAPT_PROFILE` sets `profile`, and `UNWRAPT_DEFER`
+sets `defer`, which defaults to off when `UNWRAPT_PROFILE` is set and
+to on otherwise. Then `install()` does the rest. See
 [configuration](configuration.md) for every setting.
 
 It never stops start-up: a configuration file that cannot be used,
 or an invalid environment variable, warns on stderr and is left out.
 The return value is the same as for `install()`.
+
+## unwrapt.stop_profile
+
+```python
+unwrapt.stop_profile(*, write: bool = True) -> Report | None
+```
+
+Stop the recorder and return the profile report, leaving deferral in
+place: the shim, when installed, carries on. The exit handler that
+would write the report at exit is unregistered, so a process that
+forks after calling it never has its workers write copies of the
+report. With `write` set, the report also goes where the `[profile]`
+options say, to the output path or to stderr; a failure to write is
+reported on stderr and the report is still returned. Returns None
+when no recorder is installed.
+
+The report is the structure the JSON form of the report holds, as
+described on [reading the report](reading-the-report.md#the-json-form).
+
+## unwrapt.uninstall
+
+```python
+unwrapt.uninstall() -> bool
+```
+
+Take out both layers, the recorder without writing its report, and
+clear the installed state, so `install()` can run again. Proxies
+already handed out keep working. Returns True when anything was
+installed.
+
+Both `stop_profile()` and `uninstall()` put back the import function
+below a layer only when the layer is still the current
+`builtins.__import__`. When something has wrapped `builtins.__import__`
+over unwrapt since, the layer stays in the chain as plain
+pass-through instead, so a wrapper installed over unwrapt is never
+removed.
+
+## unwrapt.installed
+
+```python
+unwrapt.installed() -> Installed | None
+```
+
+Which layers are installed, as an `Installed(defer=..., profile=...)`,
+or None when neither is.
 
 ## unwrapt.is_installed
 
@@ -49,7 +110,7 @@ The return value is the same as for `install()`.
 unwrapt.is_installed() -> bool
 ```
 
-Whether an unwrapt hook, of either mode, is installed in this process.
+Whether either layer is installed in this process.
 
 ## unwrapt.find_config
 
@@ -120,6 +181,15 @@ How a profile report is written, as a frozen dataclass: the `[profile]`
 table of the configuration file. `packages` is stored as a tuple, and
 an empty sequence as None. A relative `output` loaded from a file has
 already been resolved against the file's directory.
+
+## unwrapt.Installed
+
+```python
+unwrapt.Installed(*, defer: bool, profile: bool)
+```
+
+Which layers are installed, as a frozen dataclass: `defer` is the
+shim and `profile` the recorder.
 
 ## unwrapt.ConfigError
 

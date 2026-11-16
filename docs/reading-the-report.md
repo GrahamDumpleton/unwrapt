@@ -133,7 +133,8 @@ The shape:
 Each edge carries `deferrable.native` and `deferrable.unwrapt`
 (booleans), `unwrapt_limit` (the footnote reason, or null),
 `already_lazy`, `native_lazy` (recorded at native reification on
-3.15), `other_eager_importers` (the shared note), the `parent_id`
+3.15), `deferred` (handed back as a lazy proxy by the shim, in a
+profile with deferral on), `other_eager_importers` (the shared note), the `parent_id`
 linking it into the tree, and the timings. The `ai-assisted-tuning`
 page describes the same fields as an assistant sees them.
 

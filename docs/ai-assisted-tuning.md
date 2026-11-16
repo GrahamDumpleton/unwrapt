@@ -41,7 +41,8 @@ the structure ever changes incompatibly), `unwrapt` and `python`
   (the route columns), `unwrapt_limit` (the reason a route cannot:
   `from-import`, `dotted-as`, `function-level`, `class-level`),
   `already_lazy`, `native_lazy` (recorded at native reification on
-  3.15), and `other_eager_importers` (the shared note).
+  3.15), `deferred` (handed back as a lazy proxy, in a profile with
+  deferral on), and `other_eager_importers` (the shared note).
 
 - `heavy_modules`: by self time.
 

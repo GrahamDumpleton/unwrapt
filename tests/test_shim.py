@@ -25,7 +25,7 @@ SETUP = """
 
         import unwrapt
 
-        installed = unwrapt.install()
+        installed = unwrapt.install_from_env()
         """
 
 BELOW_315 = sys.version_info < (3, 15)
@@ -295,7 +295,7 @@ def test_missing_config_file_warns_and_continues(tmp_path: Path) -> None:
     # The warning is the point; check it on the raw output.
 
     process = run_python(
-        "import unwrapt\nunwrapt.install()\n",
+        "import unwrapt\nunwrapt.install_from_env()\n",
         env={"UNWRAPT_CONFIG": str(tmp_path / "nope.json")},
     )
 
@@ -357,7 +357,7 @@ def test_chains_to_previously_installed_wrapper(tmp_path: Path) -> None:
 
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         import wave
         import plistlib
@@ -387,7 +387,7 @@ def test_install_is_idempotent(tmp_path: Path) -> None:
     facts = run_facts(
         SETUP
         + """
-        again = unwrapt.install()
+        again = unwrapt.install_from_env()
 
         import wave
 
@@ -517,7 +517,7 @@ def test_debug_output_names_deferred_imports(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         import wave
 
@@ -562,7 +562,7 @@ def test_temp_module_records_its_import(tmp_path: Path) -> None:
 
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         import mymarker
 

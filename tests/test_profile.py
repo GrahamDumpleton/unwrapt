@@ -48,7 +48,7 @@ def test_records_loaded_and_cache_hit_edges(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         import wave
         import wave
@@ -68,7 +68,7 @@ def test_kind_and_level_classification(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         import wave
         from difflib import SequenceMatcher
@@ -122,7 +122,7 @@ def test_parent_tree_and_self_time(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         import chainpkg.a
         """,
@@ -162,7 +162,7 @@ def test_profile_mode_does_not_defer(tmp_path: Path) -> None:
 
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         __lazy_modules__ = ["wave"]
         import wave
@@ -192,7 +192,7 @@ def test_route_columns(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         import wave
         from difflib import SequenceMatcher
@@ -223,7 +223,7 @@ def test_dotted_as_edge_detected(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         import asmod
         """,
@@ -243,7 +243,7 @@ def test_min_ms_filter_hides_candidates(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         import wave
         """,
@@ -270,7 +270,7 @@ def test_output_path_expands_pid(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         import wave
         """,
@@ -297,7 +297,7 @@ def test_packages_filter(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         import mypkg.mod
         import wave
@@ -326,7 +326,7 @@ def test_json_schema_shape(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         import wave
         """,
@@ -363,6 +363,7 @@ def test_json_schema_shape(tmp_path: Path) -> None:
         "unwrapt_limit",
         "already_lazy",
         "native_lazy",
+        "deferred",
         "other_eager_importers",
     ):
         assert field in edge
@@ -373,7 +374,7 @@ def test_summary_figures_are_sane(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         import wave
         import xml.dom
@@ -393,7 +394,7 @@ def test_text_report_default_output(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         import wave
         """,
@@ -419,8 +420,8 @@ def test_install_twice_installs_once(tmp_path: Path) -> None:
 
         import unwrapt
 
-        first = unwrapt.install()
-        second = unwrapt.install()
+        first = unwrapt.install_from_env()
+        second = unwrapt.install_from_env()
 
         import wave
 

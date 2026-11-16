@@ -24,7 +24,7 @@ SETUP = """
 
         import unwrapt
 
-        installed = unwrapt.install()
+        installed = unwrapt.install_from_env()
         """
 
 
@@ -299,7 +299,7 @@ def test_debug_output_names_deferred_imports() -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         __lazy_modules__ = ["wave"]
         import wave

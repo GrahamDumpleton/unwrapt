@@ -120,6 +120,13 @@ interpreter does all of this natively and unwrapt is not involved.
   defer](https://unwrapt.readthedocs.io/en/latest/choosing-what-to-defer.html)
   guide is the way to turn it into decisions.
 
+- **Checking what the wrapping saves.** Deferral and profiling are
+  independent layers: with `UNWRAPT_DEFER=1` as well, the profile
+  measures the program with its deferrals in place.
+  `unwrapt.install(config, defer=..., profile=...)` sets both from
+  code, and `unwrapt.stop_profile()` stops the timing while deferral
+  carries on, which is what a preforking server needs at the fork.
+
 ## What it is not
 
 - **Not a replacement for PEP 810.** On 3.15+ the interpreter is the

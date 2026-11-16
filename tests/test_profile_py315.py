@@ -45,7 +45,7 @@ def test_native_lazy_import_recorded_at_first_use(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         __lazy_modules__ = ["csv"]
 
@@ -74,7 +74,7 @@ def test_untouched_native_lazy_import_never_appears(tmp_path: Path) -> None:
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         __lazy_modules__ = ["csv"]
 
@@ -98,7 +98,7 @@ def test_all_mode_warns_at_install(tmp_path: Path) -> None:
 
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
         """,
         env={"UNWRAPT_PROFILE": "1"},
         cwd=tmp_path,
@@ -117,7 +117,7 @@ def test_explicit_lazy_import_statement_recorded_at_first_use(
         """
         import unwrapt
 
-        unwrapt.install()
+        unwrapt.install_from_env()
 
         lazy import colorsys
 

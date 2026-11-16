@@ -122,8 +122,9 @@ configuration (`lazy.json` in the example directory):
 
 ## Verifying
 
-Profile mode never defers, so verify the decision by running the
-application with the shim active and watching what loads:
+The baseline profile was an eager one, which defers nothing, so
+verify the decision by running the application with the shim active
+and watching what loads:
 
 ```console
 $ AUTOWRAPT_BOOTSTRAP=unwrapt UNWRAPT_CONFIG=lazy.json python -m myapp
@@ -133,6 +134,17 @@ With the deferrals applied, sqlite3, xml.dom, decimal and wave are not
 in `sys.modules` at start-up; the first use in `main()` loads the
 first three, and wave, which nothing touches, never loads at all. The
 CI test asserts exactly that.
+
+A profile can also be taken with the deferrals in place, by adding
+`UNWRAPT_DEFER=1` to the profile run. The recorder then sits above
+the shim, and each import the shim deferred is an edge marked
+`deferred` in the JSON report:
+
+```console
+$ AUTOWRAPT_BOOTSTRAP=unwrapt UNWRAPT_CONFIG=lazy.json UNWRAPT_PROFILE=1 \
+    UNWRAPT_DEFER=1 UNWRAPT_PROFILE_FORMAT=json \
+    UNWRAPT_PROFILE_OUTPUT=deferred.json python -m myapp
+```
 
 The compare tool diffs two profiled runs of the workload, before and
 after a code change:

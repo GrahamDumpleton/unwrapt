@@ -32,3 +32,6 @@ found: str | None = unwrapt.find_config()
 loaded: unwrapt.Config = unwrapt.load_config(found)
 error: type[Exception] = unwrapt.ConfigError
 install_from_env: Callable[[], bool] = unwrapt.install_from_env
+layers: unwrapt.Installed | None = unwrapt.installed()
+uninstall: Callable[[], bool] = unwrapt.uninstall
+explicit: bool = unwrapt.install(config, defer=True, profile=False)

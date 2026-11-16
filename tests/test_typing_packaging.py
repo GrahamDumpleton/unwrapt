@@ -19,14 +19,18 @@ def test_public_api_surface() -> None:
     assert sorted(unwrapt.__all__) == [
         "Config",
         "ConfigError",
+        "Installed",
         "ProfileOptions",
         "__version__",
         "__version_info__",
         "find_config",
         "install",
         "install_from_env",
+        "installed",
         "is_installed",
         "load_config",
+        "stop_profile",
+        "uninstall",
     ]
 
     # Every name in __all__ resolves, including the configuration API

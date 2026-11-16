@@ -53,7 +53,8 @@ consumer of it.
 ## Without autowrapt
 
 `unwrapt.install()` is the explicit activation, for when you control
-the process directly: a test suite, a notebook, a one-off experiment.
+the process directly: a test suite, a notebook, a one-off experiment,
+or a host application such as a server that drives unwrapt itself.
 
 ```python
 import unwrapt
@@ -61,6 +62,9 @@ import unwrapt
 unwrapt.install()
 ```
 
-Everything else reads the same environment variables either way. The
-one difference is ordering: the explicit call takes effect from where
-it was called, so modules imported earlier in the process are eager.
+The explicit call reads no environment variables: it takes the
+configuration file, or a `Config` it is given, and switches deferral
+and profiling on as its arguments say. `unwrapt.install_from_env()`
+is the call that behaves exactly as the bootstrap does. The other
+difference is ordering: the explicit call takes effect from where it
+was called, so modules imported earlier in the process are eager.

@@ -70,3 +70,29 @@ the rest of the documentation, starting with
 - The text report's filter notes now name the `min_ms` and `packages`
   options rather than the environment variables, since either can set
   them.
+
+- **Deferral and profiling are independent layers.**
+  `unwrapt.install(config=None, *, defer=True, profile=False)` is the
+  explicit API: it does what its arguments say and reads no
+  environment variable other than `UNWRAPT_CONFIG` when it finds the
+  file itself. With both on, the recorder sits above the shim, so the
+  profile measures the program with its deferrals in place, and each
+  deferred import is an edge marked `deferred`. The `module` argument
+  `install()` used to take is gone.
+
+- **New API:** `unwrapt.stop_profile()` takes out only the recorder,
+  leaves deferral in place, unregisters the exit handler and returns
+  the report; `unwrapt.uninstall()` takes out both layers; and
+  `unwrapt.installed()` returns an `Installed(defer=..., profile=...)`
+  or None. A layer with a wrapper installed over it is left in the
+  chain as pass-through rather than removing the wrapper. See the
+  [API](api.md).
+
+- **`UNWRAPT_DEFER`** switches deferral for the bootstrap. It defaults
+  to off when `UNWRAPT_PROFILE` is set, so `UNWRAPT_PROFILE=1` alone is
+  still the eager profile for finding candidates, and to on otherwise.
+  See [configuration](configuration.md).
+
+- The recorder alone no longer imports wrapt, so an eager profile no
+  longer has wrapt and its standard library imports loaded ahead of
+  the application.
