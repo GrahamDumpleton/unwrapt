@@ -10,7 +10,7 @@ Everything is new in this series, so rather than listing changes, see
 the rest of the documentation, starting with
 [getting started](getting-started.md). The pieces, at a glance:
 
-- **Shim mode (Python 3.12 to 3.14):** whole-module imports named in a
+- **Shim mode (Python 3.11 to 3.14):** whole-module imports named in a
   module's own `__lazy_modules__`, exactly as PEP 810 specifies, are
   deferred by an import hook built on wrapt, returning a lazy proxy
   that reifies into the importing module's namespace on first use.
@@ -36,3 +36,11 @@ the rest of the documentation, starting with
   procedure](ai-assisted-tuning.md) for the same.
 
 - The first pre-release of the series is `1.0.0a1`.
+
+### Changes since 1.0.0a1
+
+- **Python 3.11 is supported.** The shim, the external configuration
+  and the profile mode now run on Python 3.11 as well, so writing
+  `__lazy_modules__` gives lazy loading on every supported version
+  with no change to the code: unwrapt emulates it from 3.11 to 3.14,
+  and the interpreter handles it natively from 3.15.

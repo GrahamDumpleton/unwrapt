@@ -150,7 +150,7 @@ the statement to first use. Do not list those; the
 
 | Python | What the shim defers | What it never does |
 | --- | --- | --- |
-| 3.12 to 3.14 | `__lazy_modules__` plus the external configuration (or the configuration alone with `UNWRAPT_CONFIG_ONLY`) | read native controls that do not exist there |
+| 3.11 to 3.14 | `__lazy_modules__` plus the external configuration (or the configuration alone with `UNWRAPT_CONFIG_ONLY`) | read native controls that do not exist there |
 | 3.15 and later | the external configuration only | read `__lazy_modules__`, call `sys.set_lazy_imports` or its filter, alter native behaviour in any way |
 
 From 3.15, with no configuration there is nothing for unwrapt to do,

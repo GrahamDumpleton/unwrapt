@@ -21,7 +21,7 @@ import threading
 import time
 import types
 from collections.abc import Callable, Mapping, Sequence
-from typing import Literal
+from typing import Literal, TypeAlias
 
 from unwrapt._compat import (
     has_native_lazy_imports,
@@ -56,7 +56,7 @@ _edges: list[Edge] = []
 
 _local = threading.local()
 
-type _StackEntry = tuple[int, list[float]]
+_StackEntry: TypeAlias = tuple[int, list[float]]
 
 
 def install_profile(settings: Settings) -> bool:

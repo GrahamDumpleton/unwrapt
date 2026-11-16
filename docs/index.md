@@ -16,7 +16,7 @@ application's code.
 Python 3.15 adds lazy imports (PEP 810): a `lazy import x` statement,
 and a module-level `__lazy_modules__` list that keeps the imports it
 names deferred while remaining ordinary valid code on older Pythons.
-unwrapt brings the `__lazy_modules__` behaviour to Python 3.12 to 3.14,
+unwrapt brings the `__lazy_modules__` behaviour to Python 3.11 to 3.14,
 emulating it on top of
 [wrapt](https://github.com/GrahamDumpleton/wrapt) so the same source
 behaves the same on every version. It is a sibling project to

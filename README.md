@@ -16,7 +16,7 @@ application's code.
 Python 3.15 adds lazy imports (PEP 810): a `lazy import x` statement,
 and a module-level `__lazy_modules__` list that keeps the imports it
 names deferred while remaining ordinary valid code on older Pythons.
-unwrapt brings the `__lazy_modules__` behaviour to Python 3.12 to 3.14,
+unwrapt brings the `__lazy_modules__` behaviour to Python 3.11 to 3.14,
 emulating it on top of [wrapt](https://github.com/GrahamDumpleton/wrapt)
 so that the same source behaves the same on every version, and it
 ships a profile mode that measures what your imports actually cost and
@@ -90,7 +90,7 @@ interpreter does all of this natively and unwrapt is not involved.
 
 ## What it does
 
-- **Shim mode (Python 3.12 to 3.14).** With
+- **Shim mode (Python 3.11 to 3.14).** With
   `AUTOWRAPT_BOOTSTRAP=unwrapt`, unwrapt replaces
   `builtins.__import__` with a hook that returns a wrapt lazy proxy
   for each whole-module import your modules mark in their own
@@ -187,7 +187,7 @@ you.
 
 ## Requirements
 
-- Python 3.12 or later.
+- Python 3.11 or later.
 
 - wrapt 2.4.1 or later.
 

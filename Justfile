@@ -1,7 +1,7 @@
 # All supported Python versions, including free threaded (t) builds.
 # 3.13t is skipped: that free threaded build was experimental and its
 # companion tooling no longer installs cleanly on some platforms.
-python_versions := "3.12 3.13 3.14 3.14t 3.15 3.15t"
+python_versions := "3.11 3.12 3.13 3.14 3.14t 3.15 3.15t"
 
 # List available targets.
 default:

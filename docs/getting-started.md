@@ -30,6 +30,13 @@ source, exactly as PEP 810 specifies. The `__lazy_modules__` list is
 ordinary valid code on every Python version: on 3.15 the interpreter
 handles it natively, and below 3.15 unwrapt does.
 
+Writing `__lazy_modules__` gives lazy loading on every Python version
+unwrapt supports, with no change to the code: unwrapt emulates it from
+3.11 to 3.14, and the interpreter handles it natively from 3.15.
+Prefer it to the `lazy import x` statement, which is a syntax error
+before 3.15, so a module written with it cannot even be imported on
+the older versions.
+
 ```python
 # app.py
 

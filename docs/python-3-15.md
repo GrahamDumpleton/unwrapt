@@ -6,6 +6,16 @@ imports it names deferred, and the `sys.set_lazy_imports()` controls.
 Everything a module declares for itself is the interpreter's business,
 and unwrapt never competes with it.
 
+## Which form to write
+
+Write `__lazy_modules__`. It gives lazy loading on every Python
+version unwrapt supports, with no change to the code: unwrapt emulates
+it from 3.11 to 3.14, and the interpreter handles it natively from
+3.15. The `lazy import x` statement is a syntax error before 3.15, so
+a module written with it cannot be imported on the older versions at
+all. Use the statement only in a project that supports nothing older
+than 3.15.
+
 ## What unwrapt does there
 
 One thing: the [external configuration](external-config.md). It is

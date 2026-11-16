@@ -36,7 +36,7 @@ uv run pytest
 
 ## Testing across Python versions
 
-The project supports Python 3.12 through 3.15, including the free
+The project supports Python 3.11 through 3.15, including the free
 threaded builds of 3.14 and 3.15 (3.13t is skipped: that build was
 experimental and its companion tooling no longer installs cleanly on
 some platforms). The supported list is defined at the top of the

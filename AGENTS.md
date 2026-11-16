@@ -179,7 +179,7 @@ the underlying commands yourself; run `just --list` to see everything.
 The hook is process global, so the suite runs its scenarios in
 subprocesses: see TESTING.md for the conventions, including the
 Python version suffix mechanism and which tests need isolation. Python
-3.12 is the minimum supported version, the matrix runs through 3.15
+3.11 is the minimum supported version, the matrix runs through 3.15
 including the free threaded builds (3.13t is skipped: that build was
 experimental and its companion tooling no longer installs cleanly on
 some platforms), and the test dependency group includes autowrapt so
