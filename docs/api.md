@@ -1,7 +1,8 @@
 # API
 
 The public API is small: the functions that install and remove the
-layers, the configuration types, and the version. Everything listed here is importable from the
+layers, the configuration types, the report and its labels, and the
+version. Everything listed here is importable from the
 `unwrapt` package itself, and importing it stays inert: the
 configuration types load on first access.
 
@@ -74,8 +75,56 @@ options say, to the output path or to stderr; a failure to write is
 reported on stderr and the report is still returned. Returns None
 when no recorder is installed.
 
-The report is the structure the JSON form of the report holds, as
-described on [reading the report](reading-the-report.md#the-json-form).
+The `Report` is versioned data, below; the labels describing the run
+can be added to it before it is rendered or stored.
+
+## unwrapt.Report
+
+```python
+report = unwrapt.stop_profile(write=False)
+
+report.labels.update(app="shop", release="r3", role="host", outcome="fork")
+
+report.to_dict()       # {"schema": 2, "labels": {...}, "edges": [...], ...}
+report.render_text()
+report.render_json()
+```
+
+A profile report. `to_dict()` is the JSON schema, described field by
+field on [reading the report](reading-the-report.md#the-json-form),
+with its `schema` version, and `render_json()` is the same as JSON.
+`render_text(*, min_ms=None, packages=None)` is the text report, with
+the display filters defaulting to the report's own. `labels` is a dict
+of the caller's own, saying what the report is of. `edges`,
+`label_sets` and `filters` hold the rest of the data, `edge(id)` finds
+an edge and `label_set(index)` the labels an edge's index refers to.
+`Report.from_dict(data)` builds one from its dictionary form, and
+raises ValueError for another schema version.
+
+## unwrapt.scope
+
+```python
+with unwrapt.scope(entrypoint="hooks"):
+    import shop.hooks
+
+token = unwrapt.push_scope(entrypoint="mount:api")
+...
+unwrapt.pop_scope(token)
+```
+
+Labels for the code being loaded: each edge records the label set in
+force when its statement ran, as one integer indexing the report's
+table of label sets. `scope(**labels)` is a context manager, and
+`push_scope(**labels)` and `pop_scope(token)` the same as a pair, for
+a caller that brackets work with two callbacks. Nested scopes merge,
+the inner value winning; scopes end in the reverse order they began,
+and `pop_scope()` raises ValueError otherwise. Values must be strings.
+The scopes are process wide, not per thread, and work, at next to no
+cost, whether or not anything is installed.
+
+The cost of a module stays with its first load, so a host that labels
+each entry point it loads sees, through `who_pays()` below, which
+entry point paid for a shared module and which later ones needed it.
 
 ## unwrapt.uninstall
 
@@ -284,11 +333,49 @@ plain version. To release, only `__version_info__` changes;
 `__version__` is derived from it, and the packaging reads it from
 there.
 
+## unwrapt.report
+
+The analysis of a report, as functions over a `Report` that a consumer
+can call or skip, and that the text renderer itself uses. Each returns
+plain dicts and lists, ready to serialise.
+
+- `load_report(path) -> Report`: read a saved JSON report.
+
+- `summary(report)`: the total import time (the outermost calls only,
+  since times nest), the modules loaded, the edges and the import
+  calls they stand for, the conservative estimated saving of deferring
+  everything both routes can, and the best single cut.
+
+- `who_pays(report)`: for each module loaded, the edge, importer and
+  labels that paid for it, its cost, and `also_needed_by`, the other
+  importers and label sets that found it already loaded, with counts.
+
+- `candidates(report, *, min_ms=None, packages=None)`: the
+  module-level imports that loaded a module, by cumulative time, each
+  with its route columns and reason, its shared importers, and
+  `saving_ms`, what deferring it alone would save once the cost that
+  would only move to another eager importer is taken off.
+
+- `chain(report, module)` and `chains(report, limit=8)`: the import
+  calls that loaded a module, outermost first, with the best cut.
+
+- `heavy_modules(report)` and `by_importer(report)`: self time by
+  top-level package, and the direct loads of each importer.
+
+- `deferred_used(report)` and `deferred_unused(report)`: in a profile
+  with deferral on, the deferred imports the run used anyway, with
+  where and at what cost, and those it never used.
+
+- `compare_reports(before, after)`: the text the `--compare` option
+  prints.
+
+The module also holds the TypedDicts these return, and the command
+line: `python -m unwrapt.report REPORT [--compare REPORT]`.
+
 ## What is deliberately not API
 
-The hook itself, the proxy class, the profile recorder and the report
-structures are implementation modules (underscore-prefixed, except the
-autowrapt `bootstrap` entry point and the `report` command module) and
-carry no stability promise before 1.0.0: none of them need importing
-from outside, and `python -m unwrapt.report` is the supported entry
-to the report tooling.
+The hook itself, the proxy class and the profile recorder are
+implementation modules (underscore-prefixed, except the autowrapt
+`bootstrap` entry point) and carry no stability promise before 1.0.0:
+none of them need importing from outside. The report's analysis is
+reached through `unwrapt.report`, and its data through `Report`.

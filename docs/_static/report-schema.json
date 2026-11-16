@@ -1,68 +1,63 @@
 {
-    "schema": 1,
+    "schema": 2,
     "unwrapt": "1.0.0a1",
     "python": "3.14.0",
-    "total_import_ms": 1240.5,
-    "summary": {
-        "modules_loaded": 13,
-        "edge_count": 47,
-        "best_cut": 12,
-        "estimated_saving_ms": 640.0,
-        "estimate_note": "conservative; edge times nest and are not additive",
-        "filters": {
-            "min_ms": 0.0,
-            "packages": null
-        }
+    "labels": {"app": "shop", "release": "r3", "role": "host", "outcome": "fork"},
+    "label_sets": [
+        {},
+        {"entrypoint": "hooks"},
+        {"entrypoint": "mount:api"}
+    ],
+    "filters": {
+        "min_ms": 0.0,
+        "packages": null
     },
     "edges": [
         {
             "id": 12,
             "parent_id": 3,
-            "imported": "yaml",
             "importer": "mypkg.config",
+            "imported": "yaml",
+            "file": "/srv/shop/mypkg/config.py",
             "line": 7,
             "kind": "from",
             "level": "module",
+            "relative": false,
             "loaded": true,
+            "count": 1,
             "cum_ms": 96.4,
             "self_ms": 0.2,
-            "deferrable": {"native": true, "unwrapt": false},
-            "unwrapt_limit": "from-import",
+            "defer": {"native": true, "unwrapt": false, "reason": "from-import"},
             "already_lazy": false,
             "native_lazy": false,
             "deferred": false,
+            "resolution": null,
             "resolves": null,
             "used_in": null,
-            "other_eager_importers": []
-        }
-    ],
-    "heavy_modules": [
-        {"module": "numpy", "self_ms": 388.0}
-    ],
-    "chains": [
+            "labels": 1
+        },
         {
-            "module": "numpy",
-            "self_ms": 388.0,
-            "links": [3, 9, 12],
-            "best_cut": 9
-        }
-    ],
-    "by_importer": [
-        {"importer": "mypkg.web", "cum_ms": 412.3}
-    ],
-    "deferred_unused": [
-        {"edge": 20, "module": "wave", "importer": "mypkg.client"}
-    ],
-    "deferred_used": [
-        {
-            "edge": 21,
-            "resolution": 30,
-            "module": "decimal",
-            "importer": "mypkg.web",
-            "used_in": "mypkg.web",
-            "line": 41,
-            "load_ms": 12.8,
-            "loaded": true
+            "id": 40,
+            "parent_id": 31,
+            "importer": "mypkg.api",
+            "imported": "yaml",
+            "file": "/srv/shop/mypkg/api.py",
+            "line": 3,
+            "kind": "import",
+            "level": "module",
+            "relative": false,
+            "loaded": false,
+            "count": 4,
+            "cum_ms": 0.02,
+            "self_ms": 0.02,
+            "defer": {"native": false, "unwrapt": false, "reason": "already-loaded"},
+            "already_lazy": false,
+            "native_lazy": false,
+            "deferred": false,
+            "resolution": null,
+            "resolves": null,
+            "used_in": null,
+            "labels": 2
         }
     ]
 }

@@ -117,7 +117,7 @@ def test_defer_off_profile_on(tmp_path: Path) -> None:
             "wrapt_loaded": wrapt_loaded,
             "wave_loaded": wave_loaded,
             "plistlib_loaded": plistlib_loaded,
-            "report": report,
+            "report": report.to_dict(),
         }))
         """,
         cwd=tmp_path,
@@ -157,7 +157,7 @@ def test_defer_on_profile_on(tmp_path: Path) -> None:
             "installed": installed,
             "layers": state,
             "deferred": deferred,
-            "report": report,
+            "report": report.to_dict(),
         }))
         """,
         cwd=tmp_path,
@@ -269,10 +269,10 @@ def test_stop_profile_leaves_deferral_in_place(tmp_path: Path) -> None:
             "again": again,
             "difflib_deferred": "difflib" not in sys.modules,
             "recorded_difflib": any(
-                edge["imported"] == "difflib" for edge in report["edges"]
+                edge["imported"] == "difflib" for edge in report.edges
             ),
             "recorded_wave": any(
-                edge["imported"] == "wave" for edge in report["edges"]
+                edge["imported"] == "wave" for edge in report.edges
             ),
         }}))
         """,
@@ -313,12 +313,12 @@ def test_stop_profile_writes_where_the_options_say(tmp_path: Path) -> None:
 
         report = unwrapt.stop_profile()
 
-        print(json.dumps({{"schema": report["schema"]}}))
+        print(json.dumps({{"schema": report.to_dict()["schema"]}}))
         """,
         cwd=tmp_path,
     )
 
-    assert facts == {"schema": 1}
+    assert facts == {"schema": 2}
 
     written = list(tmp_path.glob("report-*.json"))
 
@@ -438,7 +438,7 @@ def test_stop_profile_with_a_wrapper_over_the_recorder(tmp_path: Path) -> None:
             "wrapper_kept": builtins.__import__ is wrapper,
             "layers": layers(),
             "plistlib_loaded": "plistlib" in sys.modules,
-            "edges": len(report["edges"]),
+            "edges": len(report.edges),
         }))
         """,
         cwd=tmp_path,

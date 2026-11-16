@@ -47,6 +47,7 @@ TYPE_CHECKING = False
 
 if TYPE_CHECKING:
     from collections.abc import Callable
+    from contextlib import AbstractContextManager
 
     from unwrapt._config import (
         Config,
@@ -58,10 +59,11 @@ if TYPE_CHECKING:
     from unwrapt._records import Deferral, Installed, Resolution
     from unwrapt._report import Report
 
-# The configuration API lives in unwrapt._config and the record types
-# in unwrapt._records, both of which pull in dataclasses and more, so
-# they are loaded on first access through the module __getattr__ below
-# rather than here: importing unwrapt must stay inert.
+# The configuration API lives in unwrapt._config, the record types in
+# unwrapt._records and the Report in unwrapt._report, all of which pull
+# in dataclasses and more, so they are loaded on first access through
+# the module __getattr__ below rather than here: importing unwrapt must
+# stay inert.
 
 _LAZY_NAMES = {
     "Config": "unwrapt._config",
@@ -72,11 +74,12 @@ _LAZY_NAMES = {
     "Deferral": "unwrapt._records",
     "Installed": "unwrapt._records",
     "Resolution": "unwrapt._records",
+    "Report": "unwrapt._report",
 }
 
 
 def __getattr__(name: str) -> object:
-    """Load the configuration API and the record types on first access."""
+    """Load the configuration API, record types and Report on first access."""
 
     module_name = _LAZY_NAMES.get(name)
 
@@ -199,7 +202,9 @@ def stop_profile(*, write: bool = True) -> "Report | None":
 
     With write set, the report also goes where the profile options
     say: to the output path, or to stderr. A failure to write is
-    reported on stderr, and the report is still returned.
+    reported on stderr, and the report is still returned. The Report
+    is versioned data: to_dict() is the JSON schema, and labels can be
+    added to it before it is rendered or stored.
 
     Returns None when no recorder is installed.
     """
@@ -238,6 +243,50 @@ def uninstall() -> bool:
         uninstall_shim()
 
     return defer or profile
+
+
+def scope(**labels: str) -> "AbstractContextManager[object]":
+    """A context manager labelling the imports made inside it.
+
+    Each edge the recorder records carries the labels in force when its
+    statement ran, so a report can say which entry point needed which
+    module: with unwrapt.scope(entrypoint="hooks"): ... The labels are
+    process wide, not per thread, and nested scopes merge, the inner
+    value winning. Values must be strings. Scoping works whether or not
+    anything is installed, and costs next to nothing.
+    """
+
+    from unwrapt._labels import Scope
+
+    return Scope(dict(labels))
+
+
+def push_scope(**labels: str) -> object:
+    """Bring labels into force until pop_scope() is given the result.
+
+    The same as entering scope(), for a caller that brackets work with
+    two callbacks rather than one block.
+    """
+
+    from unwrapt._labels import push
+
+    return push(dict(labels))
+
+
+def pop_scope(token: object) -> None:
+    """End the labels push_scope() brought into force.
+
+    Scopes end in the reverse order they began: a token that is not the
+    latest raises ValueError, and so does anything push_scope() did not
+    return.
+    """
+
+    from unwrapt._labels import ScopeToken, pop
+
+    if not isinstance(token, ScopeToken):
+        raise ValueError("pop_scope() takes what push_scope() returned")
+
+    pop(token)
 
 
 def installed() -> "Installed | None":
@@ -297,6 +346,7 @@ __all__ = [
     "Deferral",
     "Installed",
     "ProfileOptions",
+    "Report",
     "Resolution",
     "__version__",
     "__version_info__",
@@ -308,6 +358,9 @@ __all__ = [
     "is_installed",
     "load_config",
     "on_resolve",
+    "pop_scope",
+    "push_scope",
+    "scope",
     "stop_profile",
     "uninstall",
 ]

@@ -7,7 +7,7 @@ all this; this page explains what each thing *is*.
 ## The summary header
 
 ```
-Summary: 1240.5 ms total import time, 187 modules loaded, 412 edges
+Summary: 1240.5 ms total import time, 187 modules loaded, 412 edges (3190 import calls)
 Estimated saving if every deferrable edge were deferred: 640.0 ms (conservative; edge times nest and are not additive)
 Best single cut: myapp -> myapp.analytics (412.3 ms cumulative)
 ```
@@ -17,6 +17,13 @@ Best single cut: myapp -> myapp.analytics (412.3 ms cumulative)
 
 - **Modules loaded** counts the distinct top-level packages the run
   actually loaded.
+
+- **Edges** counts the records in the report, and **import calls** the
+  calls they stand for: repeated already-loaded hits are folded into
+  one edge with a count, as [the JSON form](#the-json-form) describes.
+
+- **Labels**, when the report has any, follow the title line: what the
+  caller said the report is of.
 
 - **The estimated saving** is the conservative figure for deferring
   every edge both routes can defer, minus the cost that would move to
@@ -99,6 +106,7 @@ Module-level imports the run loaded, ranked by cumulative time:
 | `import x`, `import x as y`, `import a.b` | yes | yes |
 | `import a.b as c` | yes | no (1) |
 | `from x import y` | yes | no (1) |
+| `from . import y`, `from .x import y` | yes | no (1) |
 | function level | n/a (2) | n/a (2) |
 
 - **notes**: `shared (+N: ...)` lists the other modules that also
@@ -115,9 +123,9 @@ packages; both are display filters, and the JSON keeps every edge.
 The footnotes:
 
 (1) unwrapt hands back a lazy proxy, and the attribute fetch in a
-`from x import y` or `import a.b as c` resolves it immediately. The
-saving is real on Python 3.15+, or after a rewrite to `import x` and
-attribute access on older Pythons.
+`from x import y` or `import a.b as c` resolves it immediately, and it
+never defers a relative import. The saving is real on Python 3.15+, or
+after a rewrite to `import x` and attribute access on older Pythons.
 
 (2) function level imports are already deferred until the function
 runs, so there is nothing to decide.
@@ -156,27 +164,93 @@ its subtree. When every link is undone, no link is marked.
 
 ## The JSON form
 
-`UNWRAPT_PROFILE_FORMAT=json` writes the same report as JSON, with one
-object per edge and every derived section. The fields are stable from
-1.0.0; if they ever change incompatibly, the `schema` number is bumped.
-The shape:
+`UNWRAPT_PROFILE_FORMAT=json`, or `Report.render_json()`, writes the
+report as JSON. It is versioned data, and a contract: the `schema`
+field says which version of the format it is, and is bumped whenever
+a field changes incompatibly. This page describes schema 2.
+
+The JSON holds the facts the recorder saw, and nothing derived from
+them. The analysis the text report shows (the summary figures, who
+pays for each module, the candidates and their savings, the chains,
+the deferral sections) is computed from the facts by the functions in
+`unwrapt.report`, described on the [API](api.md#unwraptreport) page,
+so a consumer can call them, or compute its own.
 
 ```{literalinclude} _static/report-schema.json
 :language: json
 ```
 
-Each edge carries `kind` (`import`, `from`, or `resolve` for a
-deferred import loaded at first use), `deferrable.native` and
-`deferrable.unwrapt` (booleans), `unwrapt_limit` (the footnote reason,
-or null), `already_lazy`, `native_lazy` (recorded at native
-reification on 3.15), `deferred` (handed back as a lazy proxy by the
-shim, in a profile with deferral on), `resolves` and `used_in` (on a
-resolve edge, the id of the deferred edge it resolves and the module
-that used the proxy first), `other_eager_importers` (the shared
-note), the `parent_id` linking it into the tree, and the timings. The
-`deferred_unused` and `deferred_used` lists are the two deferral
-sections, empty for a run with deferral off. The `ai-assisted-tuning`
-page describes the same fields as an assistant sees them.
+At the top level:
+
+- `schema`, `unwrapt` and `python`: the format version, and the
+  versions that produced the report.
+
+- `labels`: the caller's description of what the report is of, such as
+  the application, the release, the process's role and the outcome.
+  Empty unless the caller added some, through `report.labels`.
+
+- `label_sets`: the table of the label sets that were in force while
+  the imports ran, as `unwrapt.scope()` set them. Each edge's `labels`
+  is an index into it, and index 0 is the empty set, outside any scope.
+
+- `filters`: the `min_ms` and `packages` display filters the text
+  rendering uses unless told otherwise. They never drop an edge.
+
+- `edges`: the import calls, in the order they started.
+
+Each edge carries:
+
+- `id` and `parent_id`: the call, and the import call it happened
+  inside, null for an outermost one. The tree and the chains are
+  built from these.
+
+- `importer`, `imported`, `file` and `line`: the importing module, the
+  full dotted name imported, and the statement's file and line, null
+  when the call came from C code.
+
+- `kind` (`import`, `from`, or `resolve` for a deferred import loaded
+  at first use), `level` (`module`, `function` or `class`) and
+  `relative`.
+
+- `loaded`: whether the call loaded the module, rather than finding it
+  already loaded. The first importer pays; the rest are cache hits.
+
+- `count`: how many calls the edge stands for. Repeated already-loaded
+  hits, which make up most of the import calls a large application
+  makes, are folded into one edge per importer, module and label set
+  (and per kind, level, and whether the hits were outermost), with a
+  count, the times summed, and the first hit's file, line and parent.
+  Nothing else is folded and nothing is pruned: every edge that loaded
+  a module, was deferred or resolved, or made nested import calls is
+  its own edge.
+
+- `cum_ms` and `self_ms`: the wall time of the call, and that time
+  minus the time spent in nested import calls.
+
+- `defer`: whether the import can be deferred. `native` is whether
+  native lazy imports on Python 3.15 could defer the statement's form.
+  `unwrapt` is whether the shim would defer this call if it were
+  listed, by the shim's own rules, so a consumer never suggests a
+  deferral the shim would refuse, and `reason` is the first rule it
+  fails: `function-level`, `class-level`, `relative`, `from-import`,
+  `dotted-as`, or `already-loaded` for a call that found the module
+  loaded.
+
+- `already_lazy`: the import is already declared deferred, by
+  `__lazy_modules__`, by the configuration, or natively on 3.15.
+  `native_lazy`: recorded at native reification on 3.15.
+
+- `deferred` and `resolution`: the shim handed back a lazy proxy, in a
+  profile with deferral on, and the id of the `resolve` edge that
+  later loaded it, or null if the run never used it. On a `resolve`
+  edge, `resolves` is the id of the deferred edge, `used_in` the
+  module that used the proxy first, and `file` and `line` where.
+
+- `labels`: the index of the label set in force when the statement
+  ran.
+
+`python -m unwrapt.report` reads schema 2 reports, and says so for
+any other version rather than misreading it.
 
 ## Limits of this report
 

@@ -1,20 +1,32 @@
-"""Tests for the report aggregation, in-process with synthetic edges.
+"""Tests for the report and its analysis, in-process with synthetic edges.
 
-build_report is pure computation, so the trickier guarantees (ordering,
-non-additivity, moved cost, chains, best cuts) are tested directly on
-hand-built edges, where the times are exact and not timing noise.
+build_report and the analysis functions are pure computation, so the
+trickier guarantees (ordering, non-additivity, moved cost, chains, best
+cuts, label sets, the schema) are tested directly on hand-built edges,
+where the times are exact and not timing noise.
 """
 
+import json
 from pathlib import Path
 from typing import Literal, cast
 
+import pytest
+
 from unwrapt._config import ProfileOptions
-from unwrapt._report import (
-    Edge,
+from unwrapt._report import Edge, build_report
+from unwrapt.report import (
+    SCHEMA,
     Report,
-    build_report,
+    by_importer,
+    candidates,
+    chain,
+    chains,
     compare_reports,
-    render_text,
+    deferred_unused,
+    deferred_used,
+    heavy_modules,
+    summary,
+    who_pays,
 )
 
 
@@ -33,13 +45,19 @@ def edge(
     self_ms: float = 0.0,
     already_lazy: bool = False,
     native_lazy: bool = False,
+    deferred: bool = False,
+    resolves: int | None = None,
+    used_in: str | None = None,
+    relative: bool = False,
+    labels: int = 0,
+    count: int = 1,
 ) -> Edge:
     return Edge(
         id=edge_id,
         parent_id=parent_id,
         importer=importer,
         imported=imported,
-        kind=cast(Literal["import", "from"], kind),
+        kind=cast(Literal["import", "from", "resolve"], kind),
         level_name=cast(Literal["module", "function", "class"], level),
         line=line,
         file=file,
@@ -48,61 +66,306 @@ def edge(
         self_ms=self_ms,
         native_lazy=native_lazy,
         already_lazy=already_lazy,
+        deferred=deferred,
+        resolves=resolves,
+        used_in=used_in,
+        relative=relative,
+        labels=labels,
+        count=count,
     )
 
 
+def report_of(*edges: Edge, options: ProfileOptions | None = None) -> Report:
+    return build_report(list(edges), options or ProfileOptions())
+
+
+# The schema.
+
+
+def test_to_dict_is_the_versioned_schema() -> None:
+    report = report_of(
+        edge(0, "csv", "app", cum_ms=10.0, self_ms=10.0, line=3, file="app.py")
+    )
+    report.labels.update(app="shop", release="r3", role="host", outcome="fork")
+
+    data = report.to_dict()
+
+    assert data["schema"] == SCHEMA == Report.SCHEMA == 2
+    assert data["labels"] == {
+        "app": "shop",
+        "release": "r3",
+        "role": "host",
+        "outcome": "fork",
+    }
+    assert data["label_sets"] == [{}]
+    assert data["filters"] == {"min_ms": 0.0, "packages": None}
+    assert set(data) == {
+        "schema",
+        "unwrapt",
+        "python",
+        "labels",
+        "label_sets",
+        "filters",
+        "edges",
+    }
+
+    assert data["edges"][0] == {
+        "id": 0,
+        "parent_id": None,
+        "importer": "app",
+        "imported": "csv",
+        "file": "app.py",
+        "line": 3,
+        "kind": "import",
+        "level": "module",
+        "relative": False,
+        "loaded": True,
+        "count": 1,
+        "cum_ms": 10.0,
+        "self_ms": 10.0,
+        "defer": {"native": True, "unwrapt": True, "reason": None},
+        "already_lazy": False,
+        "native_lazy": False,
+        "deferred": False,
+        "resolution": None,
+        "resolves": None,
+        "used_in": None,
+        "labels": 0,
+    }
+
+
+def test_report_round_trips_through_json() -> None:
+    report = report_of(edge(0, "csv", "app", cum_ms=10.0, self_ms=10.0))
+    report.labels["role"] = "host"
+
+    restored = Report.from_dict(json.loads(report.render_json()))
+
+    assert restored.to_dict() == report.to_dict()
+    assert restored.render_text() == report.render_text()
+
+
+def test_from_dict_refuses_another_schema() -> None:
+    data = dict(report_of().to_dict())
+    data["schema"] = 1
+
+    with pytest.raises(ValueError, match="schema 1 is not supported"):
+        Report.from_dict(data)
+
+
+def test_filters_stored_and_overridable() -> None:
+    report = report_of(
+        edge(0, "csv", "app", cum_ms=50.0, self_ms=50.0),
+        edge(1, "wave", "app", cum_ms=0.1, self_ms=0.1),
+        options=ProfileOptions(min_ms=10.0, packages=("app",)),
+    )
+
+    assert report.to_dict()["filters"] == {"min_ms": 10.0, "packages": ["app"]}
+
+    # The filters are applied in the render only, so a view can choose
+    # its own: every edge is still in the data.
+
+    assert {e["imported"] for e in report.edges} == {"csv", "wave"}
+    assert [row["imported"] for row in candidates(report)] == ["csv"]
+    assert [row["imported"] for row in candidates(report, min_ms=0.0)] == [
+        "csv",
+        "wave",
+    ]
+
+    text = report.render_text()
+
+    assert "hidden by the min_ms filter" in text
+    assert "hidden by the packages filter" in text
+    assert "wave" not in text.split("Candidates:")[1].split("Heavy modules:")[0]
+    assert "hidden by the min_ms filter" not in report.render_text(min_ms=0.0)
+
+
+# The defer facts, by the shim's own rules.
+
+
+def test_defer_reasons(tmp_path: Path) -> None:
+    source = tmp_path / "mod.py"
+    source.write_text("import xml.dom as dom\nimport xml.dom\n")
+
+    report = report_of(
+        edge(0, "xml.dom", "mod", line=1, file=str(source)),
+        edge(1, "xml.dom", "mod", line=2, file=str(source)),
+        edge(2, "wave", "app", level="function"),
+        edge(3, "colorsys", "app", level="class"),
+        edge(4, "sub", "pkg", kind="from", relative=True),
+        edge(5, "wave", "app", kind="from"),
+        edge(6, "csv", "app", loaded=False),
+        edge(7, "plistlib", "app", loaded=False, deferred=True),
+        edge(8, "plistlib", "app", kind="resolve", resolves=7),
+    )
+
+    defer = {e["id"]: e["defer"] for e in report.edges}
+
+    assert defer[0] == {"native": True, "unwrapt": False, "reason": "dotted-as"}
+    assert defer[1] == {"native": True, "unwrapt": True, "reason": None}
+    assert defer[2] == {"native": False, "unwrapt": False, "reason": "function-level"}
+    assert defer[3] == {"native": False, "unwrapt": False, "reason": "class-level"}
+    assert defer[4] == {"native": True, "unwrapt": False, "reason": "relative"}
+    assert defer[5] == {"native": True, "unwrapt": False, "reason": "from-import"}
+    assert defer[6] == {"native": False, "unwrapt": False, "reason": "already-loaded"}
+    assert defer[7] == {"native": True, "unwrapt": True, "reason": None}
+    assert defer[8] == {"native": True, "unwrapt": True, "reason": None}
+
+
+def test_deferred_edge_links_to_its_resolution() -> None:
+    report = report_of(
+        edge(0, "plistlib", "app", loaded=False, deferred=True),
+        edge(1, "wave", "app", loaded=False, deferred=True),
+        edge(
+            2,
+            "plistlib",
+            "app",
+            kind="resolve",
+            resolves=0,
+            used_in="app.web",
+            line=12,
+            cum_ms=4.0,
+            self_ms=4.0,
+            already_lazy=True,
+        ),
+    )
+
+    by_id = {e["id"]: e for e in report.edges}
+
+    assert by_id[0]["resolution"] == 2
+    assert by_id[1]["resolution"] is None
+
+    assert deferred_unused(report) == [{"edge": 1, "module": "wave", "importer": "app"}]
+    assert deferred_used(report) == [
+        {
+            "edge": 0,
+            "resolution": 2,
+            "module": "plistlib",
+            "importer": "app",
+            "used_in": "app.web",
+            "line": 12,
+            "load_ms": 4.0,
+            "loaded": True,
+        }
+    ]
+
+    # A resolve is not a candidate statement, nor a direct load.
+
+    assert candidates(report) == []
+    assert by_importer(report) == []
+
+
+# Labels.
+
+
+def test_labels_index_into_label_sets() -> None:
+    sets = [{}, {"entrypoint": "hooks"}, {"entrypoint": "mount:api"}]
+
+    report = build_report(
+        [
+            edge(0, "numpy", "shop.hooks", cum_ms=90.0, self_ms=90.0, labels=1),
+            edge(1, "numpy", "shop.api", loaded=False, labels=2, count=3),
+            edge(2, "numpy", "shop.hooks", loaded=False, labels=1),
+        ],
+        ProfileOptions(),
+        sets,
+    )
+
+    assert report.to_dict()["label_sets"] == sets
+    assert report.label_set(2) == {"entrypoint": "mount:api"}
+    assert report.label_set(99) == {}
+
+    # The cost stays with the first load; the already-loaded edge under
+    # a later label shows which other entry point needs the module.
+
+    paid = who_pays(report)
+
+    assert len(paid) == 1
+    assert paid[0]["module"] == "numpy"
+    assert paid[0]["importer"] == "shop.hooks"
+    assert paid[0]["labels"] == {"entrypoint": "hooks"}
+    assert paid[0]["cum_ms"] == 90.0
+    assert paid[0]["also_needed_by"] == [
+        {"importer": "shop.api", "labels": {"entrypoint": "mount:api"}, "count": 3}
+    ]
+
+
+# The analysis.
+
+
 def test_candidates_sorted_by_cumulative_time() -> None:
-    edges = [
+    report = report_of(
         edge(0, "csv", "app", cum_ms=10.0, self_ms=1.0),
         edge(1, "wave", "app", cum_ms=50.0, self_ms=2.0),
         edge(2, "string", "app", cum_ms=30.0, self_ms=3.0),
-    ]
+    )
 
-    report = build_report(edges, ProfileOptions())
+    assert [row["imported"] for row in candidates(report)] == ["wave", "string", "csv"]
+    assert [row["saving_ms"] for row in candidates(report)] == [50.0, 30.0, 10.0]
 
-    rows = [e for e in report["edges"] if e["level"] == "module" and e["loaded"]]
-    rows.sort(key=lambda e: (-e["cum_ms"], e["id"]))
 
-    assert [row["imported"] for row in rows] == ["wave", "string", "csv"]
+def test_candidate_saving_subtracts_shared_cost() -> None:
+    # web loads analytics which loads xml.dom, and other imports xml.dom
+    # too: deferring web alone moves xml.dom's load to other.
+
+    report = report_of(
+        edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=10.0),
+        edge(1, "mypkg.analytics", "mypkg.web", parent_id=0, cum_ms=80.0, self_ms=30.0),
+        edge(2, "xml.dom", "mypkg.analytics", parent_id=1, cum_ms=50.0, self_ms=50.0),
+        edge(3, "xml.dom", "other", loaded=False),
+        edge(4, "wave", "app", kind="from", cum_ms=20.0, self_ms=20.0),
+    )
+
+    rows = {row["edge"]: row for row in candidates(report)}
+
+    assert rows[0]["saving_ms"] == 50.0
+    assert rows[2]["saving_ms"] == 0.0
+    assert rows[2]["shared"] == ["other"]
+
+    # The shim cannot defer a from-import, so it saves nothing on its
+    # own under unwrapt.
+
+    assert rows[4]["unwrapt"] is False
+    assert rows[4]["reason"] == "from-import"
+    assert rows[4]["saving_ms"] == 0.0
 
 
 def test_heavy_modules_sum_self_time() -> None:
-    edges = [
+    report = report_of(
         edge(0, "xml.dom", "app", cum_ms=100.0, self_ms=40.0),
         edge(1, "csv", "app", cum_ms=10.0, self_ms=8.0),
+    )
+
+    assert heavy_modules(report) == [
+        {"module": "xml", "self_ms": 40.0},
+        {"module": "csv", "self_ms": 8.0},
     ]
-
-    report = build_report(edges, ProfileOptions())
-
-    assert report["heavy_modules"][0] == {"module": "xml", "self_ms": 40.0}
-    assert report["heavy_modules"][1] == {"module": "csv", "self_ms": 8.0}
 
 
 def test_by_importer_sums_direct_loads_only() -> None:
-    edges = [
+    report = report_of(
         edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=5.0),
         edge(1, "csv", "mypkg.web", parent_id=0, cum_ms=90.0, self_ms=85.0),
         edge(2, "mypkg.client", "app", cum_ms=20.0, self_ms=2.0),
-    ]
+    )
 
-    report = build_report(edges, ProfileOptions())
+    entries = {entry["importer"]: entry["cum_ms"] for entry in by_importer(report)}
 
-    entries = {entry["importer"]: entry["cum_ms"] for entry in report["by_importer"]}
-
-    assert entries["app"] == 120.0
-    assert entries["mypkg.web"] == 90.0
+    assert entries == {"app": 120.0, "mypkg.web": 90.0}
 
 
 def test_total_is_sum_of_outermost_edges() -> None:
-    edges = [
+    report = report_of(
         edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=5.0),
         edge(1, "csv", "mypkg.web", parent_id=0, cum_ms=90.0, self_ms=85.0),
         edge(2, "wave", "app", cum_ms=20.0, self_ms=20.0),
-    ]
+        edge(3, "os", "app", loaded=False, cum_ms=0.5, self_ms=0.5, count=5),
+    )
 
-    report = build_report(edges, ProfileOptions())
+    figures = summary(report)
 
-    assert report["total_import_ms"] == 120.0
+    assert figures["total_import_ms"] == 120.5
+    assert figures["edge_count"] == 4
+    assert figures["import_calls"] == 8
 
 
 def test_estimated_saving_three_level_nest_is_outermost() -> None:
@@ -110,233 +373,177 @@ def test_estimated_saving_three_level_nest_is_outermost() -> None:
     # saving of deferring the outermost is its own cumulative time, and
     # never a sum across the nest.
 
-    edges = [
+    report = report_of(
         edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=10.0),
         edge(1, "mypkg.analytics", "mypkg.web", parent_id=0, cum_ms=80.0, self_ms=20.0),
         edge(2, "xml.dom", "mypkg.analytics", parent_id=1, cum_ms=50.0, self_ms=50.0),
-    ]
+    )
 
-    report = build_report(edges, ProfileOptions())
-
-    assert report["summary"]["estimated_saving_ms"] == 100.0
-    assert report["total_import_ms"] == 100.0
+    assert summary(report)["estimated_saving_ms"] == 100.0
+    assert summary(report)["total_import_ms"] == 100.0
 
 
 def test_estimated_saving_subtracts_moved_cost() -> None:
     # The same nest, but another module imports the heavy module with a
-    # from-import, which neither route defers: deferring the chain only
-    # moves the cost, so the estimate subtracts it.
+    # from-import, which the shim does not defer: deferring the chain
+    # only moves the cost, so the estimate subtracts it.
 
-    edges = [
+    report = report_of(
         edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=10.0),
         edge(1, "mypkg.analytics", "mypkg.web", parent_id=0, cum_ms=80.0, self_ms=20.0),
         edge(2, "xml.dom", "mypkg.analytics", parent_id=1, cum_ms=50.0, self_ms=50.0),
-        edge(3, "xml.dom", "other", kind="from", cum_ms=50.0, self_ms=0.0),
-    ]
+        edge(3, "xml.dom", "other", kind="from", loaded=False),
+    )
 
-    report = build_report(edges, ProfileOptions())
+    assert summary(report)["estimated_saving_ms"] == 50.0
 
-    assert report["summary"]["estimated_saving_ms"] == 50.0
+
+def test_already_loaded_hit_of_a_deferrable_form_is_in_the_plan() -> None:
+    # An `import xml.dom` that found it loaded is a statement the plan
+    # defers too, so it never stands as an eager importer.
+
+    report = report_of(
+        edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=10.0),
+        edge(1, "xml.dom", "mypkg.web", parent_id=0, cum_ms=50.0, self_ms=50.0),
+        edge(2, "xml.dom", "other", loaded=False),
+    )
+
+    assert summary(report)["estimated_saving_ms"] == 100.0
 
 
 def test_shared_note_lists_other_importers() -> None:
-    edges = [
+    report = report_of(
         edge(0, "xml.dom", "app", cum_ms=100.0, self_ms=100.0),
-        edge(1, "xml.dom", "mypkg.analytics", cum_ms=5.0, self_ms=5.0),
-        edge(2, "xml.dom", "other", kind="from", cum_ms=5.0, self_ms=5.0),
-    ]
+        edge(1, "xml.dom", "mypkg.analytics", loaded=False),
+        edge(2, "xml.dom", "other", kind="from", loaded=False),
+        edge(3, "mypkg.client", "other", cum_ms=5.0, self_ms=5.0),
+    )
 
-    report = build_report(edges, ProfileOptions())
+    rows = {row["edge"]: row for row in candidates(report)}
 
-    by_id = {e["id"]: e for e in report["edges"]}
+    assert rows[0]["shared"] == ["mypkg.analytics", "other"]
 
-    assert by_id[0]["other_eager_importers"] == ["mypkg.analytics", "other"]
-    assert by_id[1]["other_eager_importers"] == ["app", "other"]
-
-
-def test_shared_note_groups_by_exact_name() -> None:
     # Importing a sibling of the top package is not importing the same
-    # module: mypkg.client does not import mypkg.web.
+    # module.
 
-    edges = [
-        edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=100.0),
-        edge(1, "mypkg.client", "other", cum_ms=5.0, self_ms=5.0),
-    ]
-
-    report = build_report(edges, ProfileOptions())
-
-    by_id = {e["id"]: e for e in report["edges"]}
-
-    assert by_id[0]["other_eager_importers"] == []
-    assert by_id[1]["other_eager_importers"] == []
+    assert rows[3]["shared"] == []
 
 
 def test_already_lazy_edges_are_not_savings() -> None:
-    edges = [
+    report = report_of(
         edge(0, "csv", "app", cum_ms=100.0, self_ms=100.0, already_lazy=True),
         edge(1, "wave", "app", cum_ms=50.0, self_ms=50.0),
-    ]
+    )
 
-    report = build_report(edges, ProfileOptions())
+    assert summary(report)["estimated_saving_ms"] == 50.0
+    assert {row["imported"]: row["saving_ms"] for row in candidates(report)} == {
+        "csv": 0.0,
+        "wave": 50.0,
+    }
 
-    assert report["summary"]["estimated_saving_ms"] == 50.0
 
-
-def test_chains_link_outermost_to_loading_edge() -> None:
-    edges = [
+def test_chain_links_outermost_to_loading_edge() -> None:
+    report = report_of(
         edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=5.0),
         edge(1, "mypkg.analytics", "mypkg.web", parent_id=0, cum_ms=80.0, self_ms=5.0),
         edge(2, "xml.dom", "mypkg.analytics", parent_id=1, cum_ms=50.0, self_ms=50.0),
-    ]
+    )
 
-    report = build_report(edges, ProfileOptions())
+    found = chain(report, "xml.dom")
 
-    chain = next(chain for chain in report["chains"] if chain["module"] == "xml")
-
-    assert chain["links"] == [0, 1, 2]
-    assert chain["best_cut"] == 0
+    assert found is not None
+    assert found["module"] == "xml"
+    assert found["links"] == [0, 1, 2]
+    assert found["best_cut"] == 0
+    assert chain(report, "numpy") is None
 
 
 def test_best_cut_moves_inward_when_outer_link_cannot_defer() -> None:
-    edges = [
+    report = report_of(
         edge(0, "mypkg.web", "app", kind="from", cum_ms=100.0, self_ms=5.0),
         edge(1, "mypkg.analytics", "mypkg.web", parent_id=0, cum_ms=80.0, self_ms=5.0),
         edge(2, "xml.dom", "mypkg.analytics", parent_id=1, cum_ms=50.0, self_ms=50.0),
-    ]
+    )
 
-    report = build_report(edges, ProfileOptions())
+    found = chain(report, "xml")
 
-    chain = next(chain for chain in report["chains"] if chain["module"] == "xml")
+    # The outermost link is a from-import the shim does not defer, so the
+    # best cut is the first link both routes can.
 
-    # The outermost link is a from-import neither route in the plan
-    # defers, so the best cut is the first link both can.
-
-    assert chain["best_cut"] == 1
+    assert found is not None and found["best_cut"] == 1
 
 
 def test_best_cut_none_when_shared_cost_moves() -> None:
-    # Every link on the chain has the heavy module also imported by an
-    # eager from-import elsewhere, so no cut on the chain keeps it
-    # unloaded.
-
-    edges = [
+    report = report_of(
         edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=5.0),
         edge(1, "xml.dom", "mypkg.web", parent_id=0, cum_ms=90.0, self_ms=90.0),
-        edge(2, "xml.dom", "other", kind="from", cum_ms=50.0, self_ms=50.0),
-    ]
+        edge(2, "xml.dom", "other", kind="from", loaded=False),
+    )
 
-    report = build_report(edges, ProfileOptions())
+    found = chain(report, "xml")
 
-    chain = next(chain for chain in report["chains"] if chain["module"] == "xml")
-
-    assert chain["best_cut"] is None
-    assert report["summary"]["estimated_saving_ms"] == 100.0 - 90.0
+    assert found is not None and found["best_cut"] is None
+    assert summary(report)["estimated_saving_ms"] == 100.0 - 90.0
 
 
 def test_best_cut_overall_is_largest() -> None:
-    edges = [
+    report = report_of(
         edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=5.0),
         edge(1, "mypkg.analytics", "mypkg.web", parent_id=0, cum_ms=80.0, self_ms=5.0),
         edge(2, "xml.dom", "mypkg.analytics", parent_id=1, cum_ms=50.0, self_ms=50.0),
         edge(3, "wave", "app", cum_ms=20.0, self_ms=20.0),
-    ]
-
-    report = build_report(edges, ProfileOptions())
-
-    assert report["summary"]["best_cut"] == 0
-
-
-def test_dotted_as_detection_reads_source(tmp_path: Path) -> None:
-    source = tmp_path / "mod.py"
-    source.write_text("import xml.dom as dom\nimport xml.dom\n")
-
-    edges = [
-        edge(0, "xml.dom", "mod", line=1, file=str(source)),
-        edge(1, "xml.dom", "mod", line=2, file=str(source)),
-    ]
-
-    report = build_report(edges, ProfileOptions())
-
-    by_id = {e["id"]: e for e in report["edges"]}
-
-    assert by_id[0]["deferrable"] == {"native": True, "unwrapt": False}
-    assert by_id[0]["unwrapt_limit"] == "dotted-as"
-
-    assert by_id[1]["deferrable"] == {"native": True, "unwrapt": True}
-    assert by_id[1]["unwrapt_limit"] is None
-
-
-def test_function_and_class_level_classification() -> None:
-    edges = [
-        edge(0, "wave", "app", level="function"),
-        edge(1, "colorsys", "app", level="class"),
-    ]
-
-    report = build_report(edges, ProfileOptions())
-
-    by_id = {e["id"]: e for e in report["edges"]}
-
-    assert by_id[0]["deferrable"] == {"native": False, "unwrapt": False}
-    assert by_id[0]["unwrapt_limit"] == "function-level"
-
-    assert by_id[1]["deferrable"] == {"native": False, "unwrapt": False}
-    assert by_id[1]["unwrapt_limit"] == "class-level"
-
-
-def test_filters_stored_in_summary() -> None:
-    edges = [edge(0, "csv", "app", cum_ms=10.0, self_ms=10.0)]
-
-    report = build_report(
-        edges,
-        ProfileOptions(min_ms=5.0, packages=("mypkg",)),
     )
 
-    assert report["summary"]["filters"]["min_ms"] == 5.0
-    assert report["summary"]["filters"]["packages"] == ["mypkg"]
+    assert summary(report)["best_cut"] == 0
+    assert [item["module"] for item in chains(report)] == ["xml", "wave", "mypkg"]
+
+
+# The renderers.
 
 
 def test_render_text_with_no_edges() -> None:
-    report = build_report([], ProfileOptions())
+    text = report_of().render_text()
 
-    text = render_text(report)
-
-    assert "0 edges" in text
+    assert "0 edges (0 import calls)" in text
     assert "(nothing to show)" in text
 
 
-def test_render_text_native_lazy_warning() -> None:
-    edges = [
-        edge(0, "csv", "app", cum_ms=10.0, self_ms=10.0, native_lazy=True),
-    ]
+def test_render_text_shows_report_labels() -> None:
+    report = report_of(edge(0, "csv", "app", cum_ms=1.0, self_ms=1.0))
+    report.labels.update(app="shop", role="host")
 
-    text = render_text(build_report(edges, ProfileOptions()))
+    assert "Labels: app=shop, role=host" in report.render_text()
+
+
+def test_render_text_native_lazy_warning() -> None:
+    text = report_of(
+        edge(0, "csv", "app", cum_ms=10.0, self_ms=10.0, native_lazy=True)
+    ).render_text()
 
     assert "native lazy imports on Python 3.15" in text
     assert "recorded at first use" in text
 
 
 def test_render_text_marks_best_cut() -> None:
-    edges = [
+    text = report_of(
         edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=5.0),
         edge(1, "xml.dom", "mypkg.web", parent_id=0, cum_ms=90.0, self_ms=90.0),
-    ]
-
-    text = render_text(build_report(edges, ProfileOptions()))
+    ).render_text()
 
     assert "<- best cut" in text
 
 
+def test_render_json_is_the_dict_form() -> None:
+    report = report_of(edge(0, "csv", "app", cum_ms=1.0, self_ms=1.0))
+
+    assert json.loads(report.render_json()) == report.to_dict()
+
+
 def test_compare_reports_lists_changes() -> None:
-    before = build_report(
-        [edge(0, "csv", "app", cum_ms=100.0, self_ms=100.0)],
-        ProfileOptions(),
-    )
-    after = build_report(
-        [
-            edge(0, "wave", "app", cum_ms=60.0, self_ms=60.0),
-            edge(1, "csv", "app", cum_ms=30.0, self_ms=30.0),
-        ],
-        ProfileOptions(),
+    before = report_of(edge(0, "csv", "app", cum_ms=100.0, self_ms=100.0))
+    after = report_of(
+        edge(0, "wave", "app", cum_ms=60.0, self_ms=60.0),
+        edge(1, "csv", "app", cum_ms=30.0, self_ms=30.0),
     )
 
     text = compare_reports(before, after)
@@ -348,47 +555,10 @@ def test_compare_reports_lists_changes() -> None:
 
 
 def test_compare_reports_no_longer_loaded() -> None:
-    before = build_report(
-        [edge(0, "csv", "app", cum_ms=100.0, self_ms=100.0)],
-        ProfileOptions(),
-    )
-    after = build_report(
-        [edge(0, "wave", "app", cum_ms=10.0, self_ms=10.0)],
-        ProfileOptions(),
-    )
+    before = report_of(edge(0, "csv", "app", cum_ms=100.0, self_ms=100.0))
+    after = report_of(edge(0, "wave", "app", cum_ms=10.0, self_ms=10.0))
 
     text = compare_reports(before, after)
 
     assert "No longer loaded: csv" in text
     assert "Newly loaded: wave" in text
-
-
-def test_report_round_trips_through_json() -> None:
-    import json
-
-    edges = [edge(0, "csv", "app", cum_ms=10.0, self_ms=10.0)]
-
-    report = build_report(edges, ProfileOptions())
-
-    restored = cast(Report, json.loads(json.dumps(report)))
-
-    assert render_text(restored) == render_text(report)
-
-
-def test_min_ms_hides_rows_in_render() -> None:
-    edges = [
-        edge(0, "csv", "app", cum_ms=50.0, self_ms=50.0),
-        edge(1, "wave", "app", cum_ms=0.1, self_ms=0.1),
-    ]
-
-    report = build_report(edges, ProfileOptions(min_ms=10.0))
-
-    text = render_text(report)
-
-    assert "csv" in text
-    assert "hidden by the min_ms filter" in text
-
-    # The hidden row is filtered in the render, not in the schema:
-    # every edge is still in the JSON.
-
-    assert {e["imported"] for e in report["edges"]} == {"csv", "wave"}

@@ -225,8 +225,9 @@ Anti-patterns to name:
    mixed support take rows true in both and treat the shim-limited
    rows as optional rewrites judged on the size of the saving.
 
-3. For `shared` rows, proceed only if every module in
-   `other_eager_importers` can also be deferred.
+3. For `shared` rows, proceed only if every module the shared note
+   lists (`shared` in `unwrapt.report.candidates()`) can also be
+   deferred.
 
 4. Before editing, read the importing module's source and check for
    import-time use of the name, and for `try/except ImportError`.

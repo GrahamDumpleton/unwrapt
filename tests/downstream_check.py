@@ -43,3 +43,19 @@ def on_resolution(resolution: unwrapt.Resolution) -> None:
 
 
 unsubscribe: Callable[[], None] = unwrapt.on_resolve(on_resolution)
+
+
+def take_report() -> None:
+    report: unwrapt.Report | None = unwrapt.stop_profile(write=False)
+
+    if report is not None:
+        report.labels.update(app="shop", role="host")
+        data: dict[str, object] = dict(report.to_dict())
+        text: str = report.render_text(min_ms=1.0)
+
+        print(data, text)
+
+
+with unwrapt.scope(entrypoint="hooks"):
+    token: object = unwrapt.push_scope(mount="api")
+    unwrapt.pop_scope(token)

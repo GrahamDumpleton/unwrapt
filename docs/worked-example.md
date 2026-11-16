@@ -34,7 +34,7 @@ The shape of what comes back (abridged; the figures are illustrative,
 the assertions in CI are not):
 
 ```
-Summary: 9.4 ms total import time, 13 modules loaded, 47 edges
+Summary: 9.4 ms total import time, 13 modules loaded, 47 edges (61 import calls)
 Estimated saving if every deferrable edge were deferred: 8.8 ms (conservative; edge times nest and are not additive)
 Best single cut: __main__ -> myapp.web (3.2 ms cumulative)
 

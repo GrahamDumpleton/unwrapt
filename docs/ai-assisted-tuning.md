@@ -9,69 +9,74 @@ method from the assistant's side of the table.
 ## What to provide
 
 1. The JSON report from a profiled run
-   (`UNWRAPT_PROFILE_FORMAT=json`), which carries everything the
-   assistant needs: per-edge timings, the tree links, the route
-   columns, the shared importers, and the already-lazy flags.
+   (`UNWRAPT_PROFILE_FORMAT=json`), which carries the facts: per-edge
+   timings, the tree links, the route columns and their reasons, the
+   already-lazy flags, and the labels.
 
-2. The target Python version or versions, which select the route
+2. The same report rendered as text, with
+   `python -m unwrapt.report report.json`. The JSON holds facts only,
+   and the text carries the analysis computed from them: the summary
+   figures, the shared importers of each candidate, the chains and
+   their best cuts.
+
+3. The target Python version or versions, which select the route
    columns to honour.
 
-3. The source of the top importing modules named in the report: the
+4. The source of the top importing modules named in the report: the
    files behind the `by importer` section and the importers of the top
    candidate rows, because the triage questions (import-time use,
    guarded imports, side effects) are answered in source, not in the
    report.
 
-4. Whether each module is editable: in code you own, the
+5. Whether each module is editable: in code you own, the
    `__lazy_modules__` route; otherwise the
    [external configuration](external-config.md).
 
 ## The JSON schema
 
-The report the assistant receives has this shape: `schema` (bumped if
-the structure ever changes incompatibly), `unwrapt` and `python`
-(versions), `total_import_ms`, and these sections:
+The report the assistant receives is schema 2, described field by
+field on [reading the report](reading-the-report.md#the-json-form):
+`schema` (bumped if a field ever changes incompatibly), `unwrapt` and
+`python` (versions), `labels` (what the report is of), `label_sets`,
+`filters`, and `edges`, one object per import call or folded run of
+already-loaded hits, with:
 
-- `edges`: one object per import call, with `cum_ms` (the wall time
-  of the call, the saving from deferring that line), `self_ms` (the
-  call's own cost, nested imports excluded), `parent_id` (the
-  enclosing import call, so chains can be walked), `kind` (`import`
-  or `from`), `level` (module, function or class), `loaded` (first
-  importer or cache hit), `deferrable.native` and `deferrable.unwrapt`
-  (the route columns), `unwrapt_limit` (the reason a route cannot:
-  `from-import`, `dotted-as`, `function-level`, `class-level`),
-  `already_lazy`, `native_lazy` (recorded at native reification on
-  3.15), `deferred` (handed back as a lazy proxy, in a profile with
-  deferral on), `resolves` and `used_in` (on a `resolve` edge, a
-  deferred import loaded at first use), and `other_eager_importers`
-  (the shared note).
+- `cum_ms` (the wall time of the call, the saving from deferring that
+  line) and `self_ms` (the call's own cost, nested imports excluded);
 
-- `deferred_unused` and `deferred_used`: in a profile with deferral
-  on, the deferrals the run never used, and those it used anyway, with
-  where each was first used and what its load cost. Empty otherwise.
+- `parent_id` (the enclosing import call, so chains can be walked);
 
-- `heavy_modules`: by self time.
+- `importer`, `imported`, `file` and `line`;
 
-- `chains`: for the heaviest modules, the `links` (edge ids,
-  outermost first) and the `best_cut` edge id, or null.
+- `kind` (`import`, `from`, or `resolve` for a deferred import loaded
+  at first use), `level` (module, function or class) and `relative`;
 
-- `by_importer`: cumulative time of each module's direct loads.
+- `loaded` (first importer or cache hit) and `count` (how many calls a
+  folded edge stands for);
 
-The summary carries `best_cut`, the conservative
-`estimated_saving_ms` (never a sum across nested edges), and the
-`filters` the report was built with.
+- `defer.native` and `defer.unwrapt` (the route columns) and
+  `defer.reason` (why the shim would not defer it: `function-level`,
+  `class-level`, `relative`, `from-import`, `dotted-as`,
+  `already-loaded`);
+
+- `already_lazy`, `native_lazy` (recorded at native reification on
+  3.15), `deferred` and `resolution` (handed back as a lazy proxy, in a
+  profile with deferral on, and the resolve edge that loaded it, if
+  any), and `resolves` and `used_in` on a resolve edge;
+
+- `labels`, an index into `label_sets`.
 
 ## The consumption procedure
 
 For the assistant, the method is the guide's:
 
-1. Take the edges deferrable on the required routes, in descending
-   `cum_ms`. For a 3.15-only target, use `deferrable.native`; for a
-   mixed-support target, take edges true in both, and treat the
-   `unwrapt_limit` edges as optional rewrites judged on the size of
-   the saving.
+1. Take the candidate rows deferrable on the required routes, in
+   descending `cum_ms`. For a 3.15-only target, use `defer.native`;
+   for a mixed-support target, take rows true in both, and treat the
+   rows whose `defer.reason` is a form the shim cannot defer as
+   optional rewrites judged on the size of the saving.
 
-2. For edges with `other_eager_importers`, proceed only if every
+2. For rows the text report marks `shared`, proceed only if every
    listed importer can also be deferred.
 
 3. For every edge you intend to change, read the importing module's
@@ -84,9 +89,9 @@ For the assistant, the method is the guide's:
 ## The prompt template
 
 > You are tuning import time for a Python application. You will be
-> given a JSON profile report from the unwrapt profiler, the target
-> Python version or versions, and the source of the importing modules
-> it names. Produce a deferral plan.
+> given a JSON profile report from the unwrapt profiler, its text
+> rendering, the target Python version or versions, and the source of
+> the importing modules it names. Produce a deferral plan.
 >
 > For each edge you propose to change, return three things:
 >
@@ -108,8 +113,9 @@ For the assistant, the method is the guide's:
 >   imported, a guarded optional dependency, or a module with
 >   import-time side effects that start-up depends on.
 >
-> - Do not propose an edge whose `other_eager_importers` cannot also
->   be deferred, unless you also defer all of those.
+> - Do not propose an edge whose shared importers, as the text
+>   report lists them, cannot also be deferred, unless you also defer
+>   all of those.
 >
 > - Rank by `cum_ms`, not `self_ms`; the chain's best cut outranks a
 >   deeper link.

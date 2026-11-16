@@ -227,10 +227,15 @@ def _deferred_profile(tmp_path: Path) -> dict[str, Any]:
         use_line = use.__code__.co_firstlineno + 1
 
         report = unwrapt.stop_profile(write=False)
-        text = __import__("unwrapt._report").\\
-            _report.render_text(report)
+        from unwrapt.report import deferred_unused, deferred_used
 
-        print(json.dumps({"report": report, "text": text, "use_line": use_line}))
+        print(json.dumps({
+            "report": report.to_dict(),
+            "unused": deferred_unused(report),
+            "used": deferred_used(report),
+            "text": report.render_text(),
+            "use_line": use_line,
+        }))
         """,
         env={"PYTHONPATH": str(tmp_path)},
         cwd=tmp_path,
@@ -248,11 +253,11 @@ def test_report_sections_for_a_deferred_run(tmp_path: Path) -> None:
 
     assert set(deferred_ids) == {"wave", "difflib", "mypkg.outer"}
 
-    assert report["deferred_unused"] == [
+    assert facts["unused"] == [
         {"edge": deferred_ids["wave"], "module": "wave", "importer": "__main__"}
     ]
 
-    used = {entry["module"]: entry for entry in report["deferred_used"]}
+    used = {entry["module"]: entry for entry in facts["used"]}
 
     assert set(used) == {"difflib", "mypkg.outer"}
 
@@ -302,13 +307,14 @@ def test_eager_report_has_no_deferral_sections(tmp_path: Path) -> None:
         import wave
 
         report = unwrapt.stop_profile(write=False)
-        text = __import__("unwrapt._report")._report.render_text(report)
-
-        print(json.dumps({"report": report, "text": text}))
+        print(json.dumps({
+            "report": report.to_dict(),
+            "text": report.render_text(),
+        }))
         """,
         cwd=tmp_path,
     )
 
-    assert facts["report"]["deferred_unused"] == []
-    assert facts["report"]["deferred_used"] == []
+    assert not any(edge["deferred"] for edge in facts["report"]["edges"])
+    assert not any(edge["kind"] == "resolve" for edge in facts["report"]["edges"])
     assert "Deferred" not in facts["text"]

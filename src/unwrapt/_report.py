@@ -1,11 +1,18 @@
-"""Aggregation of recorded edges into the profile report.
+"""The profile report: recorded facts as versioned data, and their analysis.
+
+A Report holds what the recorder saw, one record per import call (with
+repeated already-loaded hits folded into one record with a count),
+plus the labels the caller attached and the table of label sets the
+edges refer to. Its dictionary form is the JSON schema, versioned by
+its "schema" field, and holds facts only: the analysis (who pays for
+each module, the candidates and their savings, the chains leading to a
+module, the deferral outcomes) is a set of functions over a Report,
+which the text renderer uses and a consumer can call or skip.
 
 Pure computation and rendering: nothing here reads the environment,
-installs anything or imports anything at call time. The report is a
-typed structure (a TypedDict, so the JSON schema is checked and
-self-documenting) and both renderers are driven by it alone, which is
-what lets a saved JSON report be re-rendered as text, and two reports
-compared, without re-running the application.
+installs anything or imports anything at call time, which is what lets
+a saved JSON report be re-rendered as text, and two reports compared,
+without re-running the application.
 
 Cost is attributed to the first importer of a module only: later
 importers are cache hits and pay nothing, so deferring the first
@@ -22,14 +29,19 @@ import linecache
 import platform
 import re
 import sys
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Literal, TypedDict, cast
+from typing import Any, Literal, TypedDict
 
 from unwrapt import __version__
 from unwrapt._config import ProfileOptions
 
-# How many heavy modules get an import chain in the report.
+# The version of the dictionary form. Bumped whenever a field changes
+# incompatibly.
+
+SCHEMA = 2
+
+# How many heavy modules get an import chain in the text report.
 _CHAIN_LIMIT = 8
 
 # `import a.b as c` cannot be deferred by the shim on older Pythons:
@@ -43,50 +55,147 @@ _DOTTED_AS = re.compile(r"^\s*(?:lazy\s+)?import\s+([\w.]+)\s+as\s+\w+\s*(?:#.*)
 _ESTIMATE_NOTE = "conservative; edge times nest and are not additive"
 
 
-class Deferrability(TypedDict):
-    """Whether each route can defer the import: native is Python 3.15+."""
+# The dictionary form, which is the JSON schema.
+
+
+class Defer(TypedDict):
+    """Whether the import can be deferred, and if not by the shim, why.
+
+    native is whether native lazy imports (Python 3.15 and later) could
+    defer the statement's form. unwrapt is whether the shim would defer
+    this call if the import were listed, by the shim's own rules, and
+    reason is the first of those rules it fails: function-level,
+    class-level, relative, from-import, dotted-as or already-loaded.
+    """
 
     native: bool
     unwrapt: bool
+    reason: str | None
 
 
 class EdgeRecord(TypedDict):
-    """One import edge, in the JSON report."""
+    """One import call, or one folded run of already-loaded hits."""
 
     id: int
     parent_id: int | None
-    imported: str
     importer: str | None
+    imported: str
+    file: str | None
     line: int | None
     kind: str
     level: str
+    relative: bool
     loaded: bool
+    count: int
     cum_ms: float
     self_ms: float
-    deferrable: Deferrability
-    unwrapt_limit: str | None
+    defer: Defer
     already_lazy: bool
     native_lazy: bool
     deferred: bool
+    resolution: int | None
     resolves: int | None
     used_in: str | None
-    other_eager_importers: list[str]
+    labels: int
 
 
-class HeavyModule(TypedDict):
-    """An imported module and the self time it cost."""
+class Filters(TypedDict):
+    """The display filters a text rendering uses unless told otherwise."""
+
+    min_ms: float
+    packages: list[str] | None
+
+
+class ReportDict(TypedDict):
+    """The whole report, in the JSON schema."""
+
+    schema: int
+    unwrapt: str
+    python: str
+    labels: dict[str, str]
+    label_sets: list[dict[str, str]]
+    filters: Filters
+    edges: list[EdgeRecord]
+
+
+# The analysis results.
+
+
+class Summary(TypedDict):
+    """The headline figures of a report."""
+
+    total_import_ms: float
+    modules_loaded: int
+    edge_count: int
+    import_calls: int
+    estimated_saving_ms: float
+    estimate_note: str
+    best_cut: int | None
+
+
+class Need(TypedDict):
+    """An importer that needed a module someone else had already loaded."""
+
+    importer: str | None
+    labels: dict[str, str]
+    count: int
+
+
+class Payment(TypedDict):
+    """Who paid to load a module, and who else needed it afterwards."""
 
     module: str
+    edge: int
+    importer: str | None
+    labels: dict[str, str]
+    cum_ms: float
     self_ms: float
+    also_needed_by: list[Need]
+
+
+class Candidate(TypedDict):
+    """A module-level import that loaded a module, as a deferral candidate.
+
+    saving_ms is what deferring this one import alone would save: its
+    cumulative time, less the cost of any module it loads that another
+    eager importer would load anyway, and zero when the shim cannot
+    defer it, it is already lazy, or its own module is shared.
+    """
+
+    edge: int
+    imported: str
+    importer: str | None
+    cum_ms: float
+    self_ms: float
+    native: bool
+    unwrapt: bool
+    reason: str | None
+    already_lazy: bool
+    shared: list[str]
+    saving_ms: float
 
 
 class Chain(TypedDict):
-    """The path of import calls that loaded a heavy module."""
+    """The path of import calls that loaded a module, outermost first."""
 
     module: str
     self_ms: float
     links: list[int]
     best_cut: int | None
+
+
+class HeavyModule(TypedDict):
+    """A top-level package and the self time its loads cost."""
+
+    module: str
+    self_ms: float
+
+
+class ByImporter(TypedDict):
+    """An importing module and the cumulative time of its direct loads."""
+
+    importer: str
+    cum_ms: float
 
 
 class DeferredUnused(TypedDict):
@@ -110,66 +219,29 @@ class DeferredUsed(TypedDict):
     loaded: bool
 
 
-class ByImporter(TypedDict):
-    """An importing module and the cumulative time of its direct loads."""
-
-    importer: str
-    cum_ms: float
-
-
-class ReportFilters(TypedDict):
-    """The display filters the report was built with."""
-
-    min_ms: float
-    packages: list[str] | None
-
-
-class Summary(TypedDict):
-    """The summary header figures."""
-
-    modules_loaded: int
-    edge_count: int
-    best_cut: int | None
-    estimated_saving_ms: float
-    estimate_note: str
-    filters: ReportFilters
-
-
-class Report(TypedDict):
-    """The whole profile report, in the JSON schema."""
-
-    schema: int
-    unwrapt: str
-    python: str
-    total_import_ms: float
-    summary: Summary
-    edges: list[EdgeRecord]
-    heavy_modules: list[HeavyModule]
-    chains: list[Chain]
-    by_importer: list[ByImporter]
-    deferred_unused: list[DeferredUnused]
-    deferred_used: list[DeferredUsed]
+# The recorder's in-memory form.
 
 
 @dataclass(frozen=True)
 class Edge:
-    """One recorded import call.
+    """One recorded import call, as the recorder holds it.
 
     kind is "import" or "from" depending on whether the call had a
     fromlist, or "resolve" for a deferred import being resolved at
     first use, in a run with deferral on; level_name is "module",
-    "function" or "class" for where the statement sits. already_lazy
-    marks an import that is already declared deferred, by
-    __lazy_modules__, by the external configuration, or natively on
-    Python 3.15; native_lazy is the
+    "function" or "class" for where the statement sits, and relative
+    whether the import was relative. already_lazy marks an import that
+    is already declared deferred, by __lazy_modules__, by the external
+    configuration, or natively on Python 3.15; native_lazy is the
     Python 3.15 case, an import recorded at native reification rather
     than at its statement. deferred marks an import the shim below the
     recorder handed back as a lazy proxy, in a run with deferral on. A
     resolve edge carries in resolves the id of the deferred edge it
     resolves, when the recorder saw that deferral, and in used_in the
     module that used the proxy first; its line is the line of that
-    first use. file and line locate the statement for the dotted-as
-    check, and file is not part of the JSON report.
+    first use. labels is the index of the label set in force, and count
+    the number of already-loaded hits a folded edge stands for, with
+    their times summed.
     """
 
     id: int
@@ -188,20 +260,160 @@ class Edge:
     deferred: bool = False
     resolves: int | None = None
     used_in: str | None = None
+    relative: bool = False
+    labels: int = 0
+    count: int = 1
 
 
-@dataclass(frozen=True)
-class _Classified:
-    """An edge with its route columns computed."""
+class Report:
+    """A profile report, as versioned data.
 
-    edge: Edge
-    native: bool
-    unwrapt: bool
-    limit: str | None
+    labels is the caller's own description of what the report is of,
+    a dict to update freely, for example with app, release, role and
+    outcome. label_sets is the table of the label sets in force when
+    edges were recorded, which each edge's labels field indexes, and
+    edges the import calls. filters holds the display filters a text
+    rendering uses unless told otherwise. to_dict() is the JSON schema.
+    """
 
-    @property
-    def both_routes(self) -> bool:
-        return self.native and self.unwrapt
+    SCHEMA = SCHEMA
+
+    def __init__(
+        self,
+        *,
+        edges: list[EdgeRecord],
+        label_sets: list[dict[str, str]],
+        filters: Filters,
+        labels: dict[str, str] | None = None,
+        unwrapt: str = __version__,
+        python: str | None = None,
+    ) -> None:
+        self.unwrapt = unwrapt
+        self.python = python if python is not None else platform.python_version()
+        self.labels: dict[str, str] = dict(labels or {})
+        self.label_sets = label_sets
+        self.filters = filters
+        self.edges = edges
+        self._graph: _Graph | None = None
+
+    @classmethod
+    def from_dict(cls, data: Mapping[str, Any]) -> "Report":
+        """Build a Report from its dictionary form, as loaded from JSON.
+
+        Raises ValueError for a report of another schema version.
+        """
+
+        schema = data.get("schema")
+
+        if schema != SCHEMA:
+            raise ValueError(
+                f"report schema {schema!r} is not supported: this unwrapt reads"
+                f" schema {SCHEMA}, so profile the application again"
+            )
+
+        return cls(
+            edges=list(data["edges"]),
+            label_sets=[dict(item) for item in data["label_sets"]],
+            filters=Filters(
+                min_ms=float(data["filters"]["min_ms"]),
+                packages=data["filters"]["packages"],
+            ),
+            labels=dict(data["labels"]),
+            unwrapt=str(data["unwrapt"]),
+            python=str(data["python"]),
+        )
+
+    def to_dict(self) -> ReportDict:
+        """The dictionary form: the JSON schema, with a "schema" version."""
+
+        return ReportDict(
+            schema=SCHEMA,
+            unwrapt=self.unwrapt,
+            python=self.python,
+            labels=dict(self.labels),
+            label_sets=[dict(item) for item in self.label_sets],
+            filters=Filters(
+                min_ms=self.filters["min_ms"],
+                packages=list(self.filters["packages"])
+                if self.filters["packages"] is not None
+                else None,
+            ),
+            edges=list(self.edges),
+        )
+
+    def render_json(self) -> str:
+        """The dictionary form as JSON, indented for reading."""
+
+        return json.dumps(self.to_dict(), indent=2)
+
+    def render_text(
+        self,
+        *,
+        min_ms: float | None = None,
+        packages: Sequence[str] | None = None,
+    ) -> str:
+        """The text report.
+
+        A summary header, the deferral sections for a run with deferral
+        on, then candidates, heavy modules, by importer and import
+        chains. min_ms and packages filter the candidate rows, and
+        default to the report's own filters.
+        """
+
+        return _render_text(self, min_ms, packages)
+
+    def edge(self, edge_id: int | None) -> EdgeRecord | None:
+        """The edge record with the given id, when the report has one."""
+
+        if edge_id is None:
+            return None
+
+        return self.graph().by_id.get(edge_id)
+
+    def label_set(self, index: int) -> dict[str, str]:
+        """The labels an edge's labels index refers to."""
+
+        if 0 <= index < len(self.label_sets):
+            return dict(self.label_sets[index])
+
+        return {}
+
+    def graph(self) -> "_Graph":
+        """The edge lookup tables, built once."""
+
+        if self._graph is None:
+            self._graph = _Graph(self.edges)
+
+        return self._graph
+
+
+class _Graph:
+    """The lookup tables over a report's edges: by id, and children."""
+
+    def __init__(self, edges: Sequence[EdgeRecord]) -> None:
+        self.by_id: dict[int, EdgeRecord] = {edge["id"]: edge for edge in edges}
+        self.children: dict[int, list[int]] = {}
+
+        for edge in edges:
+            if edge["parent_id"] is not None:
+                self.children.setdefault(edge["parent_id"], []).append(edge["id"])
+
+    def descendants(self, root: int) -> set[int]:
+        """The ids of every edge nested below root, excluding root itself."""
+
+        seen: set[int] = set()
+        pending = list(self.children.get(root, ()))
+
+        while pending:
+            edge_id = pending.pop()
+
+            if edge_id in seen:
+                continue
+
+            seen.add(edge_id)
+            pending.extend(self.children.get(edge_id, ()))
+
+        return seen
 
 
 def top_level(name: str) -> str:
@@ -211,247 +423,342 @@ def top_level(name: str) -> str:
     return name.partition(".")[0]
 
 
-def build_report(edges: Sequence[Edge], options: ProfileOptions) -> Report:
-    """Aggregate recorded edges into the report structure.
+def build_report(
+    edges: Sequence[Edge],
+    options: ProfileOptions,
+    label_sets: Sequence[Mapping[str, str]] = ({},),
+) -> Report:
+    """Turn recorded edges into a Report.
 
-    options supplies the display filters, which are stored in the
-    report for the text renderer and never drop an edge.
+    options supplies the display filters, stored in the report for the
+    text renderer, and never drops an edge. label_sets is the table the
+    edges' label indexes refer to.
     """
 
-    classified = [_classify(edge) for edge in edges]
-    by_id = {item.edge.id: item for item in classified}
-    children = _children_map(edges)
+    resolutions = {
+        edge.resolves: edge.id for edge in edges if edge.resolves is not None
+    }
 
-    heavy = _heavy_modules(classified)
-    by_importer = _by_importer(classified)
-    total = sum(item.edge.cum_ms for item in classified if item.edge.parent_id is None)
-
-    kept = _kept_edges(classified, children)
-    eager = _eager_loaders(classified, children, kept)
-
-    estimated_saving = _estimated_saving(by_id, children, kept, eager)
-    chains = _chains(by_id, children, kept, eager, heavy)
-    best_cut = _best_cut(chains, by_id)
-
-    edges_out = [
-        _edge_record(item, _other_eager_importers(item, classified))
-        for item in classified
+    records = [
+        _edge_record(edge, resolutions.get(edge.id))
+        for edge in sorted(edges, key=lambda edge: edge.id)
     ]
 
     return Report(
-        schema=1,
-        unwrapt=__version__,
-        python=platform.python_version(),
-        total_import_ms=total,
-        summary=Summary(
-            modules_loaded=len(heavy),
-            edge_count=len(edges),
-            best_cut=best_cut,
-            estimated_saving_ms=estimated_saving,
-            estimate_note=_ESTIMATE_NOTE,
-            filters=ReportFilters(
-                min_ms=options.min_ms,
-                packages=list(options.packages)
-                if options.packages is not None
-                else None,
-            ),
+        edges=records,
+        label_sets=[dict(item) for item in label_sets],
+        filters=Filters(
+            min_ms=options.min_ms,
+            packages=list(options.packages) if options.packages is not None else None,
         ),
-        edges=edges_out,
-        heavy_modules=heavy,
-        chains=chains,
-        by_importer=by_importer,
-        deferred_unused=_deferred_unused(edges),
-        deferred_used=_deferred_used(edges),
     )
 
 
-def render_text(report: Report) -> str:
-    """Render the report as the text report: a summary header, then
-    candidates, heavy modules, by importer, and import chains."""
+def load_report(path: str) -> Report:
+    """Load a saved JSON profile report.
 
-    edges = report["edges"]
-    summary = report["summary"]
-    lines: list[str] = []
+    Raises OSError or json.JSONDecodeError for a file that cannot be
+    read, and ValueError for a report of another schema version.
+    """
 
-    # Summary header.
+    with open(path, encoding="utf-8") as fp:
+        data = json.load(fp)
 
-    lines.append(f"unwrapt {report['unwrapt']} profile report")
-    lines.append("")
+    if not isinstance(data, dict):
+        raise ValueError(f"{path} is not an unwrapt profile report")
 
-    lines.append(
-        f"Summary: {_ms(report['total_import_ms'])} ms total import time,"
-        f" {summary['modules_loaded']} modules loaded,"
-        f" {summary['edge_count']} edges"
+    return Report.from_dict(data)
+
+
+# The analysis.
+
+
+def summary(report: Report) -> Summary:
+    """The headline figures: the totals, and the deferral plan's saving.
+
+    The total is the sum of the outermost import calls, so a nest
+    counts once. The estimated saving is for deferring every
+    module-level import both routes can defer, net of the cost that
+    would only move to another eager importer, and the best cut is the
+    single link that removes the most.
+    """
+
+    plan = _Plan(report)
+
+    return Summary(
+        total_import_ms=sum(
+            edge["cum_ms"] for edge in report.edges if edge["parent_id"] is None
+        ),
+        modules_loaded=len(heavy_modules(report)),
+        edge_count=len(report.edges),
+        import_calls=sum(edge["count"] for edge in report.edges),
+        estimated_saving_ms=plan.estimated_saving(),
+        estimate_note=_ESTIMATE_NOTE,
+        best_cut=_best_cut(report, chains(report)),
     )
-    lines.append(
-        f"Estimated saving if every deferrable edge were deferred:"
-        f" {_ms(summary['estimated_saving_ms'])} ms"
-        f" ({summary['estimate_note']})"
-    )
 
-    best = _edge(report, summary["best_cut"])
 
-    if best is not None:
-        lines.append(
-            f"Best single cut: {_who(best)} -> {best['imported']}"
-            f" ({_ms(best['cum_ms'])} ms cumulative)"
+def who_pays(report: Report) -> list[Payment]:
+    """For each module loaded, the import that paid for it and who else
+    needed it, costliest first.
+
+    The cost of a module stays with its first load. Every other import
+    of the same name that found it loaded, under whatever labels were
+    in force, is listed as also needing it, grouped by importer and
+    label set with a count: that is how a later entry point shows that
+    it needs a module an earlier one paid for.
+    """
+
+    needs: dict[str, dict[tuple[str | None, int], int]] = {}
+
+    for edge in report.edges:
+        if not edge["loaded"] and edge["kind"] != "resolve" and not edge["deferred"]:
+            key = (edge["importer"], edge["labels"])
+            by_need = needs.setdefault(edge["imported"], {})
+            by_need[key] = by_need.get(key, 0) + edge["count"]
+
+    payments: list[Payment] = []
+    seen: set[str] = set()
+
+    for edge in sorted(report.edges, key=lambda edge: edge["id"]):
+        module = edge["imported"]
+
+        if not edge["loaded"] or module in seen:
+            continue
+
+        seen.add(module)
+
+        also = [
+            Need(importer=importer, labels=report.label_set(labels), count=count)
+            for (importer, labels), count in needs.get(module, {}).items()
+            if not (importer == edge["importer"] and labels == edge["labels"])
+        ]
+
+        payments.append(
+            Payment(
+                module=module,
+                edge=edge["id"],
+                importer=edge["importer"],
+                labels=report.label_set(edge["labels"]),
+                cum_ms=edge["cum_ms"],
+                self_ms=edge["self_ms"],
+                also_needed_by=also,
+            )
         )
 
-    # Native lazy imports (Python 3.15) are recorded at first use, and
-    # the reader needs to know which edges those are and what that
-    # means for the figures.
+    payments.sort(key=lambda payment: (-payment["cum_ms"], payment["edge"]))
 
-    reified = sum(1 for edge in edges if edge["native_lazy"])
+    return payments
 
-    if reified:
-        lines.append("")
-        lines.append(
-            f"Warning: {reified} native lazy imports on Python 3.15"
-            " were recorded at first use rather than at their import"
-            " statements. Their cost is real, and attributed to the"
-            " importing module, but the line is the site of first use"
-            " and the timing is the load cost wherever it landed. To"
-            " measure an eager run, unset native lazy imports"
-            " (PYTHON_LAZY_IMPORTS=normal) and profile again."
+
+def candidates(
+    report: Report,
+    *,
+    min_ms: float | None = None,
+    packages: Sequence[str] | None = None,
+) -> list[Candidate]:
+    """The module-level imports that loaded a module, ranked by
+    cumulative time, with what deferring each alone would save.
+
+    No row is dropped because a route cannot defer it: the native and
+    unwrapt columns say which can. min_ms and packages default to the
+    report's filters; packages keeps only importers under the named
+    top-level packages.
+    """
+
+    if min_ms is None:
+        min_ms = report.filters["min_ms"]
+
+    if packages is None and report.filters["packages"] is not None:
+        packages = report.filters["packages"]
+
+    graph = report.graph()
+    eager = _eager_importers(report)
+
+    rows: list[Candidate] = []
+
+    for edge in report.edges:
+        if (
+            edge["level"] != "module"
+            or edge["kind"] == "resolve"
+            or not edge["loaded"]
+            or edge["cum_ms"] < min_ms
+            or not _under_packages(edge["importer"], packages)
+        ):
+            continue
+
+        rows.append(
+            Candidate(
+                edge=edge["id"],
+                imported=edge["imported"],
+                importer=edge["importer"],
+                cum_ms=edge["cum_ms"],
+                self_ms=edge["self_ms"],
+                native=edge["defer"]["native"],
+                unwrapt=edge["defer"]["unwrapt"],
+                reason=edge["defer"]["reason"],
+                already_lazy=edge["already_lazy"],
+                shared=_shared(report, edge),
+                saving_ms=_single_saving(graph, edge, eager),
+            )
         )
 
-    # The deferral sections, for a run with deferral on.
+    rows.sort(key=lambda row: (-row["cum_ms"], row["edge"]))
 
-    lines.extend(_render_deferrals(report))
+    return rows
 
-    # Candidates: loaded module-level imports, ranked by cumulative
-    # time, never dropped because a route cannot defer them. A resolve
-    # edge is not a statement to change, and has its own section.
 
-    filters = summary["filters"]
-    min_ms = filters["min_ms"]
-    packages = filters["packages"]
+def chain(report: Report, module: str) -> Chain | None:
+    """The chain of import calls that loaded module, outermost first.
 
-    lines.append("")
-    lines.append("Candidates: module-level imports, ranked by cumulative time")
+    module is matched by top-level package, against the first edge that
+    loaded it. A chain is the list of places the load could be cut. Its
+    best cut is the outermost link that both routes can defer, that is
+    not already lazy, and whose deferral is not undone by an eager
+    importer of a module in its subtree. Deferring an outer link
+    removes the whole subtree beneath it, so the outermost safe link
+    saves the most. Returns None when nothing loaded the module.
+    """
 
-    if min_ms > 0.0:
-        lines.append(f"(rows under {_ms(min_ms)} ms hidden by the min_ms filter)")
+    graph = report.graph()
+    target = top_level(module)
 
-    if packages is not None:
-        names = ", ".join(packages)
-        lines.append(f"(rows outside {names} hidden by the packages filter)")
-
-    rows = [
+    loading = [
         edge
-        for edge in edges
-        if edge["level"] == "module"
-        and edge["kind"] != "resolve"
-        and edge["loaded"]
-        and edge["cum_ms"] >= min_ms
-        and _under_packages(edge["importer"], packages)
-    ]
-    rows.sort(key=lambda edge: (-edge["cum_ms"], edge["id"]))
-
-    table = [
-        ["cum ms", "self ms", "imported", "imported by", "3.15", "unwrapt", "notes"]
+        for edge in report.edges
+        if edge["loaded"] and top_level(edge["imported"]) == target
     ]
 
-    for edge in rows:
-        table.append(
-            [
-                _ms(edge["cum_ms"]),
-                _ms(edge["self_ms"]),
-                edge["imported"],
-                _who(edge),
-                _native_cell(edge),
-                _unwrapt_cell(edge),
-                _notes(edge),
-            ]
+    if not loading:
+        return None
+
+    first = min(loading, key=lambda edge: edge["id"])
+
+    # Walk parents to the outermost import, then emit root first.
+
+    links: list[int] = []
+    current: EdgeRecord | None = first
+
+    while current is not None:
+        links.append(current["id"])
+        parent_id = current["parent_id"]
+        current = graph.by_id.get(parent_id) if parent_id is not None else None
+
+    links.reverse()
+
+    self_ms = sum(edge["self_ms"] for edge in loading)
+
+    return Chain(
+        module=target,
+        self_ms=self_ms,
+        links=links,
+        best_cut=_Plan(report).best_cut(links),
+    )
+
+
+def chains(report: Report, limit: int = _CHAIN_LIMIT) -> list[Chain]:
+    """The chains of the heaviest modules, heaviest first."""
+
+    result: list[Chain] = []
+
+    for heavy in heavy_modules(report)[:limit]:
+        found = chain(report, heavy["module"])
+
+        if found is not None:
+            result.append(found)
+
+    return result
+
+
+def heavy_modules(report: Report) -> list[HeavyModule]:
+    """Self time per loaded top-level package, heaviest first.
+
+    Self time separates a module's own import work from the modules it
+    pulls in, so a thin wrapper that drags in a heavy dependency shows
+    near-zero self time while the dependency shows the cost.
+    """
+
+    heavy: dict[str, float] = {}
+
+    for edge in report.edges:
+        if edge["loaded"]:
+            module = top_level(edge["imported"])
+            heavy[module] = heavy.get(module, 0.0) + edge["self_ms"]
+
+    return [
+        HeavyModule(module=module, self_ms=self_ms)
+        for module, self_ms in sorted(heavy.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+
+def by_importer(report: Report) -> list[ByImporter]:
+    """Cumulative time of each importer's direct module-level loads.
+
+    These are the files to edit first: the sum counts only edges whose
+    statement sits in the module itself, never the imports made by the
+    modules it goes on to load, and never the resolve of an import that
+    is already deferred.
+    """
+
+    by: dict[str, float] = {}
+
+    for edge in report.edges:
+        if (
+            edge["loaded"]
+            and edge["level"] == "module"
+            and edge["kind"] != "resolve"
+            and edge["importer"] is not None
+        ):
+            by[edge["importer"]] = by.get(edge["importer"], 0.0) + edge["cum_ms"]
+
+    return [
+        ByImporter(importer=importer, cum_ms=cum_ms)
+        for importer, cum_ms in sorted(by.items(), key=lambda kv: (-kv[1], kv[0]))
+    ]
+
+
+def deferred_unused(report: Report) -> list[DeferredUnused]:
+    """The deferred imports the run never used, in recorded order."""
+
+    return [
+        DeferredUnused(
+            edge=edge["id"], module=edge["imported"], importer=edge["importer"]
         )
-
-    # Numbers and route columns right aligned, names and notes left.
-
-    lines.extend(_table(table, [False, False, True, True, False, False, True]))
-
-    lines.append("")
-    lines.append("  (1) unwrapt hands back a lazy proxy, and the attribute")
-    lines.append("      fetch in a `from x import y` or `import a.b as c`")
-    lines.append("      resolves it immediately. The saving is real on Python")
-    lines.append("      3.15+, or after a rewrite to `import x` and attribute")
-    lines.append("      access on older Pythons.")
-    lines.append("  (2) function level imports are already deferred until the")
-    lines.append("      function runs, so there is nothing to decide.")
-
-    # Heavy modules.
-
-    lines.append("")
-    lines.append("Heavy modules: by self time")
-
-    for heavy_module in report["heavy_modules"]:
-        lines.append(f"  {_ms(heavy_module['self_ms'])} ms  {heavy_module['module']}")
-
-    # By importer.
-
-    lines.append("")
-    lines.append("By importer: direct module-level loads, the files to edit first")
-
-    for entry in report["by_importer"]:
-        lines.append(f"  {_ms(entry['cum_ms'])} ms  {entry['importer']}")
-
-    # Import chains.
-
-    lines.append("")
-    lines.append("Import chains: why each heavy module is loaded")
-
-    for chain in report["chains"]:
-        lines.append("")
-        lines.append(f"  {chain['module']}  {_ms(chain['self_ms'])} ms self")
-
-        for edge_id in chain["links"]:
-            link = _edge(report, edge_id)
-
-            if link is None:
-                continue
-
-            parts = [
-                f"    {_who(link)} -> {link['imported']}",
-                f"cum {_ms(link['cum_ms'])} ms",
-                f"3.15 {_native_cell(link)}",
-                f"unwrapt {_unwrapt_cell(link)}",
-            ]
-
-            if link["id"] == chain["best_cut"]:
-                parts.append("<- best cut")
-
-            notes = _notes(link)
-
-            if notes:
-                parts.append(notes)
-
-            lines.append("  ".join(parts))
-
-    # Limits.
-
-    lines.append("")
-    lines.append("Limits of this report:")
-    lines.append("")
-
-    for limit in _LIMITS:
-        lines.append(f"- {limit}")
-
-    return "\n".join(lines)
+        for edge in report.edges
+        if edge["deferred"] and edge["resolution"] is None
+    ]
 
 
-def render_json(report: Report) -> str:
-    """Render the report as the JSON form, indented for reading."""
+def deferred_used(report: Report) -> list[DeferredUsed]:
+    """The deferred imports the run used anyway, costliest first, with
+    where each was first used and what its load cost."""
 
-    return json.dumps(report, indent=2)
+    resolves = [edge for edge in report.edges if edge["kind"] == "resolve"]
+    resolves.sort(key=lambda edge: (-edge["cum_ms"], edge["id"]))
+
+    return [
+        DeferredUsed(
+            edge=edge["resolves"],
+            resolution=edge["id"],
+            module=edge["imported"],
+            importer=edge["importer"],
+            used_in=edge["used_in"],
+            line=edge["line"],
+            load_ms=edge["cum_ms"],
+            loaded=edge["loaded"],
+        )
+        for edge in resolves
+    ]
 
 
 def compare_reports(before: Report, after: Report) -> str:
-    """Compare two JSON reports: totals, per-module self time changes,
-    and modules newly loaded or no longer loaded."""
+    """Compare two reports: totals, per-module self time changes, and
+    modules newly loaded or no longer loaded."""
 
     lines: list[str] = []
 
-    old_total = before["total_import_ms"]
-    new_total = after["total_import_ms"]
+    old_total = summary(before)["total_import_ms"]
+    new_total = summary(after)["total_import_ms"]
 
     change = new_total - old_total
     percent = (change / old_total * 100.0) if old_total else 0.0
@@ -475,8 +782,8 @@ def compare_reports(before: Report, after: Report) -> str:
     if gone:
         lines.append(f"No longer loaded: {', '.join(gone)}")
 
-    old_self = {entry["module"]: entry["self_ms"] for entry in before["heavy_modules"]}
-    new_self = {entry["module"]: entry["self_ms"] for entry in after["heavy_modules"]}
+    old_self = {entry["module"]: entry["self_ms"] for entry in heavy_modules(before)}
+    new_self = {entry["module"]: entry["self_ms"] for entry in heavy_modules(after)}
 
     changes = sorted(
         (
@@ -519,14 +826,14 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     try:
-        before = _load_report(args.report)
-        after = _load_report(args.compare) if args.compare else None
-    except (OSError, json.JSONDecodeError) as exc:
+        before = load_report(args.report)
+        after = load_report(args.compare) if args.compare else None
+    except (OSError, ValueError) as exc:
         print(f"unwrapt: {exc}", file=sys.stderr)
 
         return 1
 
-    print(render_text(before))
+    print(before.render_text())
 
     if after is not None:
         print("")
@@ -535,28 +842,70 @@ def main(argv: Sequence[str] | None = None) -> int:
     return 0
 
 
-def _classify(edge: Edge) -> _Classified:
-    """Compute the route columns for one edge.
+# Classification of the recorded edges.
 
-    A limit of the shim is not a property of the code: on Python 3.15
-    a `from x import y` is deferrable natively. The columns therefore
-    report each route separately, and no row is ever dropped because a
-    route cannot handle it.
+
+def _edge_record(edge: Edge, resolution: int | None) -> EdgeRecord:
+    """The dictionary form of one edge."""
+
+    return EdgeRecord(
+        id=edge.id,
+        parent_id=edge.parent_id,
+        importer=edge.importer,
+        imported=edge.imported,
+        file=edge.file,
+        line=edge.line,
+        kind=edge.kind,
+        level=edge.level_name,
+        relative=edge.relative,
+        loaded=edge.loaded,
+        count=edge.count,
+        cum_ms=edge.cum_ms,
+        self_ms=edge.self_ms,
+        defer=_defer(edge),
+        already_lazy=edge.already_lazy,
+        native_lazy=edge.native_lazy,
+        deferred=edge.deferred,
+        resolution=resolution,
+        resolves=edge.resolves,
+        used_in=edge.used_in,
+        labels=edge.labels,
+    )
+
+
+def _defer(edge: Edge) -> Defer:
+    """Whether each route can defer the import, by the shim's own rules.
+
+    The shim's rules, in the order the reason reports them: a
+    module-level statement (not a function or class body), absolute,
+    whole-module (no fromlist), not `import a.b as c`, and the module
+    not already loaded. The native route defers any form at module
+    level, relative and from-imports included, so a limit of the shim
+    is not a property of the code: the two routes are reported
+    separately, and no edge is ever dropped because one cannot defer
+    it. A resolve edge is a statement that was deferred, and a
+    deferred edge one the shim did defer.
     """
 
     if edge.level_name == "function":
-        return _Classified(edge, False, False, "function-level")
+        return Defer(native=False, unwrapt=False, reason="function-level")
 
     if edge.level_name == "class":
-        return _Classified(edge, False, False, "class-level")
+        return Defer(native=False, unwrapt=False, reason="class-level")
+
+    if edge.relative:
+        return Defer(native=True, unwrapt=False, reason="relative")
 
     if edge.kind == "from":
-        return _Classified(edge, True, False, "from-import")
+        return Defer(native=True, unwrapt=False, reason="from-import")
 
-    if _is_dotted_as(edge):
-        return _Classified(edge, True, False, "dotted-as")
+    if edge.kind == "import" and not edge.loaded and not edge.deferred:
+        return Defer(native=False, unwrapt=False, reason="already-loaded")
 
-    return _Classified(edge, True, True, None)
+    if edge.kind == "import" and _is_dotted_as(edge):
+        return Defer(native=True, unwrapt=False, reason="dotted-as")
+
+    return Defer(native=True, unwrapt=True, reason=None)
 
 
 def _is_dotted_as(edge: Edge) -> bool:
@@ -584,297 +933,131 @@ def _is_dotted_as(edge: Edge) -> bool:
     return "." in match.group(1)
 
 
-def _children_map(edges: Sequence[Edge]) -> dict[int, list[int]]:
-    """Map each edge id to the ids of its direct children."""
+def _both_routes(edge: EdgeRecord) -> bool:
+    """Whether both routes can defer the statement's form.
 
-    children: dict[int, list[int]] = {}
-
-    for edge in edges:
-        if edge.parent_id is not None:
-            children.setdefault(edge.parent_id, []).append(edge.id)
-
-    return children
-
-
-def _descendants(children: dict[int, list[int]], root: int) -> set[int]:
-    """The ids of every edge nested below root, excluding root itself."""
-
-    seen: set[int] = set()
-    pending = list(children.get(root, ()))
-
-    while pending:
-        edge_id = pending.pop()
-
-        if edge_id in seen:
-            continue
-
-        seen.add(edge_id)
-        pending.extend(children.get(edge_id, ()))
-
-    return seen
-
-
-def _heavy_modules(classified: Sequence[_Classified]) -> list[HeavyModule]:
-    """Self time per imported top-level package, heaviest first.
-
-    Only loaded edges carry cost; self time separates a module's own
-    import work from the modules it pulls in, so a thin wrapper that
-    drags in a heavy dependency shows near-zero self time while the
-    dependency shows the cost.
+    An already-loaded hit counts: the shim would pass that one call
+    through, but the statement is one the plan can defer, and does, so
+    it never stands as an eager importer.
     """
 
-    heavy: dict[str, float] = {}
+    defer = edge["defer"]
 
-    for item in classified:
-        edge = item.edge
-
-        if edge.loaded:
-            module = top_level(edge.imported)
-            heavy[module] = heavy.get(module, 0.0) + edge.self_ms
-
-    return [
-        HeavyModule(module=module, self_ms=self_ms)
-        for module, self_ms in sorted(heavy.items(), key=lambda kv: (-kv[1], kv[0]))
-    ]
+    return (defer["native"] and defer["unwrapt"]) or defer["reason"] == "already-loaded"
 
 
-def _by_importer(classified: Sequence[_Classified]) -> list[ByImporter]:
-    """Cumulative time of each importer's direct module-level loads.
-
-    These are the files to edit first: the sum counts only edges whose
-    statement sits in the module itself, never the imports made by the
-    modules it goes on to load, and never the resolve of an import that
-    is already deferred.
-    """
-
-    by: dict[str, float] = {}
-
-    for item in classified:
-        edge = item.edge
-
-        if (
-            edge.loaded
-            and edge.level_name == "module"
-            and edge.kind != "resolve"
-            and edge.importer is not None
-        ):
-            by[edge.importer] = by.get(edge.importer, 0.0) + edge.cum_ms
-
-    return [
-        ByImporter(importer=importer, cum_ms=cum_ms)
-        for importer, cum_ms in sorted(by.items(), key=lambda kv: (-kv[1], kv[0]))
-    ]
-
-
-def _kept_edges(
-    classified: Sequence[_Classified], children: dict[int, list[int]]
-) -> list[_Classified]:
-    """The deferral plan behind the estimated saving.
+class _Plan:
+    """The deferral plan behind the estimated saving and the best cuts.
 
     Every loaded module-level import that both routes can defer and
-    that is not already lazy is a planned deferral, except that an
-    edge nested below another planned deferral is not kept: deferring
-    the outer one already removes it, and adding its time would double
-    count.
+    that is not already lazy is a planned deferral, except that an edge
+    nested below another planned deferral is not kept: deferring the
+    outer one already removes it, and adding its time would double
+    count. The eager importers are the module-level imports outside the
+    plan that are not already lazy and that a route cannot defer: they
+    would load their modules anyway.
     """
 
-    candidates = [
-        item
-        for item in classified
-        if item.both_routes
-        and item.edge.loaded
-        and item.edge.level_name == "module"
-        and not item.edge.already_lazy
-    ]
+    def __init__(self, report: Report) -> None:
+        self.graph = report.graph()
 
-    inside: set[int] = set()
+        planned = [
+            edge
+            for edge in report.edges
+            if _both_routes(edge)
+            and edge["loaded"]
+            and edge["level"] == "module"
+            and not edge["already_lazy"]
+        ]
 
-    for item in candidates:
-        inside |= _descendants(children, item.edge.id)
+        inside: set[int] = set()
 
-    return [item for item in candidates if item.edge.id not in inside]
+        for edge in planned:
+            inside |= self.graph.descendants(edge["id"])
 
+        self.kept = [edge for edge in planned if edge["id"] not in inside]
+        self.kept_ids = {edge["id"] for edge in self.kept}
 
-def _eager_loaders(
-    classified: Sequence[_Classified],
-    children: dict[int, list[int]],
-    kept: Sequence[_Classified],
-) -> dict[str, bool]:
-    """The modules that eager importers would load anyway after the plan.
+        self.inside_kept: set[int] = set()
 
-    An eager importer is a module-level import that is not already
-    lazy and that neither route can defer: a `from x import y`, an
-    `import a.b as c`, or an import in a class body. What both routes
-    can defer is in the plan (or beneath it), and imports inside the
-    plan's subtrees never run once it is deferred, so only the rest can
-    still load a module. The result maps each such module's top-level
-    package to True.
-    """
+        for edge in self.kept:
+            self.inside_kept |= self.graph.descendants(edge["id"])
 
-    kept_ids = {item.edge.id for item in kept}
-    inside_kept: set[int] = set()
+        self.eager: set[str] = set()
 
-    for item in kept:
-        inside_kept |= _descendants(children, item.edge.id)
+        for edge in report.edges:
+            if (
+                edge["id"] not in self.inside_kept
+                and edge["id"] not in self.kept_ids
+                and edge["level"] == "module"
+                and not edge["already_lazy"]
+                and not _both_routes(edge)
+            ):
+                self.eager.add(top_level(edge["imported"]))
 
-    eager: dict[str, bool] = {}
+    def estimated_saving(self) -> float:
+        """The conservative estimated saving of the plan.
 
-    for item in classified:
-        edge = item.edge
+        The kept edges' cumulative times, minus the cost of any module
+        in their subtrees that an eager importer would load anyway: that
+        cost moves, it does not disappear. A module loaded more than
+        once inside the plan is counted once, at its most expensive
+        load.
+        """
 
-        if (
-            edge.id not in inside_kept
-            and edge.id not in kept_ids
-            and edge.level_name == "module"
-            and not edge.already_lazy
-            and not item.both_routes
-        ):
-            eager[top_level(edge.imported)] = True
+        if not self.kept:
+            return 0.0
 
-    return eager
+        moved: dict[str, float] = {}
 
+        for edge_id in self.inside_kept:
+            edge = self.graph.by_id[edge_id]
+            module = top_level(edge["imported"])
 
-def _estimated_saving(
-    by_id: dict[int, _Classified],
-    children: dict[int, list[int]],
-    kept: Sequence[_Classified],
-    eager: dict[str, bool],
-) -> float:
-    """The conservative estimated saving of the deferral plan.
+            if edge["loaded"] and module in self.eager:
+                moved[module] = max(moved.get(module, 0.0), edge["cum_ms"])
 
-    The saving is the sum of the kept edges' cumulative times, minus
-    the cost of any module in their subtrees that an eager importer
-    would load anyway: that cost moves to the next eager importer, it
-    does not disappear. A module loaded more than once inside the plan
-    is counted once, at its most expensive load. The figure is an
-    estimate, and labelled as one.
-    """
+        saving = sum(edge["cum_ms"] for edge in self.kept) - sum(moved.values())
 
-    if not kept:
-        return 0.0
+        # Timing noise aside, a nest cannot save more than it costs.
 
-    inside_kept: set[int] = set()
+        return max(saving, 0.0)
 
-    for item in kept:
-        inside_kept |= _descendants(children, item.edge.id)
+    def best_cut(self, links: Sequence[int]) -> int | None:
+        """The outermost safe link of a chain, scanning from the root.
 
-    moved: dict[str, float] = {}
+        A link is safe when no module loaded in its subtree has an eager
+        importer outside the plan: otherwise deferring the link only
+        moves that module's cost.
+        """
 
-    for edge_id in inside_kept:
-        edge = by_id[edge_id].edge
-        module = top_level(edge.imported)
+        for link_id in links:
+            if link_id not in self.kept_ids:
+                continue
 
-        if edge.loaded and eager.get(module):
-            moved[module] = max(moved.get(module, 0.0), edge.cum_ms)
-
-    saving = sum(item.edge.cum_ms for item in kept) - sum(moved.values())
-
-    # Timing noise aside, a nest cannot save more than it costs.
-
-    return max(saving, 0.0)
-
-
-def _chains(
-    by_id: dict[int, _Classified],
-    children: dict[int, list[int]],
-    kept: Sequence[_Classified],
-    eager: dict[str, bool],
-    heavy: Sequence[HeavyModule],
-) -> list[Chain]:
-    """For each of the heaviest modules, the chain of imports that
-    loaded it, outermost first, with the best cut marked.
-
-    A chain is the list of places the load could be cut. The best cut
-    is the outermost link that both routes can defer, that is not
-    already lazy, and whose deferral is not undone by an eager
-    importer of a module in its subtree. Deferring an outer link
-    removes the whole subtree beneath it, so the outermost safe link
-    saves the most.
-    """
-
-    kept_ids = {item.edge.id for item in kept}
-
-    chains: list[Chain] = []
-
-    for heavy_module in heavy[:_CHAIN_LIMIT]:
-        module = heavy_module["module"]
-        loading = None
-
-        for item in by_id.values():
-            if item.edge.loaded and top_level(item.edge.imported) == module:
-                if loading is None or item.edge.id < loading.edge.id:
-                    loading = item
-
-        if loading is None:
-            continue
-
-        # Walk parents to the outermost import, then emit root first.
-
-        links: list[int] = []
-        current: _Classified | None = loading
-
-        while current is not None:
-            links.append(current.edge.id)
-            parent_id = current.edge.parent_id
-            current = by_id.get(parent_id) if parent_id is not None else None
-
-        links.reverse()
-
-        best_cut = _chain_best_cut(links, by_id, children, kept_ids, eager)
-
-        chains.append(
-            Chain(
-                module=module,
-                self_ms=heavy_module["self_ms"],
-                links=links,
-                best_cut=best_cut,
+            undone = any(
+                top_level(self.graph.by_id[desc]["imported"]) in self.eager
+                for desc in self.graph.descendants(link_id)
+                if self.graph.by_id[desc]["loaded"]
             )
-        )
 
-    return chains
+            if not undone:
+                return link_id
 
-
-def _chain_best_cut(
-    links: Sequence[int],
-    by_id: dict[int, _Classified],
-    children: dict[int, list[int]],
-    kept_ids: set[int],
-    eager: dict[str, bool],
-) -> int | None:
-    """The outermost safe link of a chain, scanning from the root.
-
-    A link is safe when no module loaded in its subtree has an eager
-    importer outside the deferral plan: otherwise deferring the link
-    only moves that module's cost. The first safe link from the root is
-    the best cut, because it removes the most.
-    """
-
-    for link_id in links:
-        if link_id not in kept_ids:
-            continue
-
-        subtree = _descendants(children, link_id)
-
-        undone = any(
-            eager.get(top_level(by_id[desc].edge.imported))
-            for desc in subtree
-            if by_id[desc].edge.loaded
-        )
-
-        if not undone:
-            return link_id
-
-    return None
+        return None
 
 
-def _best_cut(chains: Sequence[Chain], by_id: dict[int, _Classified]) -> int | None:
+def _best_cut(report: Report, found: Sequence[Chain]) -> int | None:
     """The single best cut overall: the largest best cut across chains."""
 
-    cuts = [
-        (by_id[chain["best_cut"]].edge.cum_ms, chain["best_cut"])
-        for chain in chains
-        if chain["best_cut"] is not None
-    ]
+    cuts: list[tuple[float, int]] = []
+
+    for item in found:
+        cut = item["best_cut"]
+        edge = report.edge(cut)
+
+        if cut is not None and edge is not None:
+            cuts.append((edge["cum_ms"], cut))
 
     if not cuts:
         return None
@@ -882,109 +1065,307 @@ def _best_cut(chains: Sequence[Chain], by_id: dict[int, _Classified]) -> int | N
     return max(cuts)[1]
 
 
-def _other_eager_importers(
-    item: _Classified, classified: Sequence[_Classified]
-) -> list[str]:
-    """The other modules that also import this edge's module and are
-    not already lazy, loaded or cache hit. Their existence is what the
-    shared note reports: a shared module only stays unloaded if every
-    eager importer of it is deferred.
+def _eager_importers(report: Report) -> dict[str, set[int]]:
+    """For each top-level package, the module-level edges importing it
+    that are not already lazy, loaded or cache hit."""
+
+    eager: dict[str, set[int]] = {}
+
+    for edge in report.edges:
+        if (
+            edge["level"] == "module"
+            and edge["kind"] != "resolve"
+            and not edge["already_lazy"]
+            and not edge["deferred"]
+        ):
+            eager.setdefault(top_level(edge["imported"]), set()).add(edge["id"])
+
+    return eager
+
+
+def _single_saving(
+    graph: _Graph, edge: EdgeRecord, eager: Mapping[str, set[int]]
+) -> float:
+    """What deferring this one import, and nothing else, would save.
+
+    Every module it loads, itself included, whose top-level package has
+    another eager importer outside its subtree would be loaded there
+    anyway, so that load's cost moves rather than disappearing.
+    """
+
+    if not edge["defer"]["unwrapt"] or edge["already_lazy"]:
+        return 0.0
+
+    subtree = graph.descendants(edge["id"])
+    inside = subtree | {edge["id"]}
+
+    moved: dict[str, float] = {}
+
+    for edge_id in inside:
+        loaded = graph.by_id[edge_id]
+        module = top_level(loaded["imported"])
+
+        if loaded["loaded"] and eager.get(module, set()) - inside:
+            moved[module] = max(moved.get(module, 0.0), loaded["cum_ms"])
+
+    return max(edge["cum_ms"] - sum(moved.values()), 0.0)
+
+
+def _shared(report: Report, edge: EdgeRecord) -> list[str]:
+    """The other modules that also import this edge's module and are not
+    already lazy, loaded or cache hit. A shared module only stays
+    unloaded if every eager importer of it is deferred.
 
     The same module means the same imported name, so `import xml.dom`
     and `from xml.dom import Node` count as importers of the same
-    module while `import xml` alone does not: it loads the xml package
-    but not xml.dom. The moved-cost correction inside the estimated
-    saving is coarser than this and groups by top-level package, see
-    _eager_loaders; the note lists what the reader can act on.
+    module while `import xml` alone does not.
     """
 
-    edge = item.edge
     others: set[str] = set()
 
-    for other in classified:
-        candidate = other.edge
-
+    for candidate in report.edges:
         if (
-            candidate.importer is not None
-            and candidate.importer != edge.importer
-            and candidate.level_name == "module"
-            and not candidate.already_lazy
-            and candidate.imported == edge.imported
+            candidate["importer"] is not None
+            and candidate["importer"] != edge["importer"]
+            and candidate["level"] == "module"
+            and candidate["kind"] != "resolve"
+            and not candidate["already_lazy"]
+            and candidate["imported"] == edge["imported"]
         ):
-            others.add(candidate.importer)
+            others.add(candidate["importer"])
 
     return sorted(others)
 
 
-def _edge_record(item: _Classified, other_eager: list[str]) -> EdgeRecord:
-    """The JSON form of one edge."""
+def _under_packages(importer: str | None, packages: Sequence[str] | None) -> bool:
+    """Whether the importing module is one of the packages named by the
+    packages filter, or lives under one of them. Importers outside them
+    are treated as not editable and hidden."""
 
-    edge = item.edge
+    if packages is None:
+        return True
 
-    return EdgeRecord(
-        id=edge.id,
-        parent_id=edge.parent_id,
-        imported=edge.imported,
-        importer=edge.importer,
-        line=edge.line,
-        kind=edge.kind,
-        level=edge.level_name,
-        loaded=edge.loaded,
-        cum_ms=edge.cum_ms,
-        self_ms=edge.self_ms,
-        deferrable=Deferrability(native=item.native, unwrapt=item.unwrapt),
-        unwrapt_limit=item.limit,
-        already_lazy=edge.already_lazy,
-        native_lazy=edge.native_lazy,
-        deferred=edge.deferred,
-        resolves=edge.resolves,
-        used_in=edge.used_in,
-        other_eager_importers=other_eager,
+    if importer is None:
+        return False
+
+    return any(
+        importer == package or importer.startswith(f"{package}.")
+        for package in packages
     )
 
 
-def _deferred_unused(edges: Sequence[Edge]) -> list[DeferredUnused]:
-    """The deferred edges no resolve edge resolved, in recorded order."""
+def _loaded_modules(report: Report) -> set[str]:
+    """The top-level packages a report's loaded edges brought in."""
 
-    resolved = {edge.resolves for edge in edges if edge.resolves is not None}
-
-    return [
-        DeferredUnused(edge=edge.id, module=edge.imported, importer=edge.importer)
-        for edge in sorted(edges, key=lambda edge: edge.id)
-        if edge.deferred and edge.id not in resolved
-    ]
+    return {top_level(edge["imported"]) for edge in report.edges if edge["loaded"]}
 
 
-def _deferred_used(edges: Sequence[Edge]) -> list[DeferredUsed]:
-    """The resolve edges, costliest first, with where each was used."""
+# The text renderer.
 
-    resolves = [edge for edge in edges if edge.kind == "resolve"]
-    resolves.sort(key=lambda edge: (-edge.cum_ms, edge.id))
 
-    return [
-        DeferredUsed(
-            edge=edge.resolves,
-            resolution=edge.id,
-            module=edge.imported,
-            importer=edge.importer,
-            used_in=edge.used_in,
-            line=edge.line,
-            load_ms=edge.cum_ms,
-            loaded=edge.loaded,
+_LIMITS = [
+    "The profile cannot see import-time use of the imported name by the"
+    " importing module: class bases, decorators, default arguments,"
+    " annotations without `from __future__ import annotations` and"
+    " module level calls all force resolution at import time, and none"
+    " of them show here.",
+    "A `try/except ImportError` around the import is invisible to the"
+    " profile: deferring a guarded optional dependency moves its"
+    " ImportError to first use.",
+    "The report describes the workload that was profiled, not every"
+    " workload: an import cheap on one path may be unavoidable on"
+    " another.",
+    "Imports made through importlib.import_module and the C import API,"
+    " and submodule loads inside `from` imports, do not pass through the"
+    " hook as edges of their own: their time is included in the"
+    " enclosing cumulative figure but gets no row.",
+    "Per-import timing overhead inflates every figure. Compare relative"
+    " sizes, against `python -X importtime` for example, and never treat"
+    " a millisecond figure as a wall-clock promise.",
+]
+
+
+def _render_text(
+    report: Report,
+    min_ms: float | None,
+    packages: Sequence[str] | None,
+) -> str:
+    """Render the text report, from the analysis functions alone."""
+
+    if min_ms is None:
+        min_ms = report.filters["min_ms"]
+
+    if packages is None and report.filters["packages"] is not None:
+        packages = report.filters["packages"]
+
+    headline = summary(report)
+    lines: list[str] = []
+
+    # Summary header.
+
+    lines.append(f"unwrapt {report.unwrapt} profile report")
+
+    if report.labels:
+        names = ", ".join(f"{key}={value}" for key, value in report.labels.items())
+        lines.append(f"Labels: {names}")
+
+    lines.append("")
+
+    lines.append(
+        f"Summary: {_ms(headline['total_import_ms'])} ms total import time,"
+        f" {headline['modules_loaded']} modules loaded,"
+        f" {headline['edge_count']} edges ({headline['import_calls']} import calls)"
+    )
+    lines.append(
+        f"Estimated saving if every deferrable edge were deferred:"
+        f" {_ms(headline['estimated_saving_ms'])} ms"
+        f" ({headline['estimate_note']})"
+    )
+
+    best = report.edge(headline["best_cut"])
+
+    if best is not None:
+        lines.append(
+            f"Best single cut: {_who(best)} -> {best['imported']}"
+            f" ({_ms(best['cum_ms'])} ms cumulative)"
         )
-        for edge in resolves
+
+    # Native lazy imports (Python 3.15) are recorded at first use, and
+    # the reader needs to know which edges those are and what that
+    # means for the figures.
+
+    reified = sum(1 for edge in report.edges if edge["native_lazy"])
+
+    if reified:
+        lines.append("")
+        lines.append(
+            f"Warning: {reified} native lazy imports on Python 3.15"
+            " were recorded at first use rather than at their import"
+            " statements. Their cost is real, and attributed to the"
+            " importing module, but the line is the site of first use"
+            " and the timing is the load cost wherever it landed. To"
+            " measure an eager run, unset native lazy imports"
+            " (PYTHON_LAZY_IMPORTS=normal) and profile again."
+        )
+
+    # The deferral sections, for a run with deferral on.
+
+    lines.extend(_render_deferrals(report))
+
+    # Candidates: loaded module-level imports, ranked by cumulative
+    # time, never dropped because a route cannot defer them. A resolve
+    # edge is not a statement to change, and has its own section.
+
+    lines.append("")
+    lines.append("Candidates: module-level imports, ranked by cumulative time")
+
+    if min_ms > 0.0:
+        lines.append(f"(rows under {_ms(min_ms)} ms hidden by the min_ms filter)")
+
+    if packages is not None:
+        names = ", ".join(packages)
+        lines.append(f"(rows outside {names} hidden by the packages filter)")
+
+    table = [
+        ["cum ms", "self ms", "imported", "imported by", "3.15", "unwrapt", "notes"]
     ]
+
+    for row in candidates(report, min_ms=min_ms, packages=packages):
+        edge = report.edge(row["edge"])
+
+        assert edge is not None
+
+        table.append(
+            [
+                _ms(row["cum_ms"]),
+                _ms(row["self_ms"]),
+                row["imported"],
+                _who(edge),
+                _native_cell(edge),
+                _unwrapt_cell(edge),
+                _notes(edge, row["shared"]),
+            ]
+        )
+
+    # Numbers and route columns right aligned, names and notes left.
+
+    lines.extend(_table(table, [False, False, True, True, False, False, True]))
+
+    lines.append("")
+    lines.append("  (1) unwrapt hands back a lazy proxy, and the attribute")
+    lines.append("      fetch in a `from x import y` or `import a.b as c`")
+    lines.append("      resolves it immediately, and it never defers a")
+    lines.append("      relative import. The saving is real on Python")
+    lines.append("      3.15+, or after a rewrite to `import x` and attribute")
+    lines.append("      access on older Pythons.")
+    lines.append("  (2) function level imports are already deferred until the")
+    lines.append("      function runs, so there is nothing to decide.")
+
+    # Heavy modules.
+
+    lines.append("")
+    lines.append("Heavy modules: by self time")
+
+    for heavy in heavy_modules(report):
+        lines.append(f"  {_ms(heavy['self_ms'])} ms  {heavy['module']}")
+
+    # By importer.
+
+    lines.append("")
+    lines.append("By importer: direct module-level loads, the files to edit first")
+
+    for entry in by_importer(report):
+        lines.append(f"  {_ms(entry['cum_ms'])} ms  {entry['importer']}")
+
+    # Import chains.
+
+    lines.append("")
+    lines.append("Import chains: why each heavy module is loaded")
+
+    for item in chains(report):
+        lines.append("")
+        lines.append(f"  {item['module']}  {_ms(item['self_ms'])} ms self")
+
+        for edge_id in item["links"]:
+            link = report.edge(edge_id)
+
+            if link is None:
+                continue
+
+            parts = [
+                f"    {_who(link)} -> {link['imported']}",
+                f"cum {_ms(link['cum_ms'])} ms",
+                f"3.15 {_native_cell(link)}",
+                f"unwrapt {_unwrapt_cell(link)}",
+            ]
+
+            if link["id"] == item["best_cut"]:
+                parts.append("<- best cut")
+
+            notes = _notes(link, _shared(report, link))
+
+            if notes:
+                parts.append(notes)
+
+            lines.append("  ".join(parts))
+
+    # Limits.
+
+    lines.append("")
+    lines.append("Limits of this report:")
+    lines.append("")
+
+    for limit in _LIMITS:
+        lines.append(f"- {limit}")
+
+    return "\n".join(lines)
 
 
 def _render_deferrals(report: Report) -> list[str]:
-    """The two deferral sections of the text report.
+    """The two deferral sections, shown only for a run that deferred."""
 
-    Shown only for a run with deferral on. A saved report from before
-    these sections existed has neither key, and shows neither.
-    """
-
-    unused = report.get("deferred_unused", [])
-    used = report.get("deferred_used", [])
+    unused = deferred_unused(report)
+    used = deferred_used(report)
 
     if not unused and not used:
         return []
@@ -1028,41 +1409,6 @@ def _render_deferrals(report: Report) -> list[str]:
     return lines
 
 
-_LIMITS = [
-    "The profile cannot see import-time use of the imported name by the"
-    " importing module: class bases, decorators, default arguments,"
-    " annotations without `from __future__ import annotations` and"
-    " module level calls all force resolution at import time, and none"
-    " of them show here.",
-    "A `try/except ImportError` around the import is invisible to the"
-    " profile: deferring a guarded optional dependency moves its"
-    " ImportError to first use.",
-    "The report describes the workload that was profiled, not every"
-    " workload: an import cheap on one path may be unavoidable on"
-    " another.",
-    "Imports made through importlib.import_module and the C import API,"
-    " and submodule loads inside `from` imports, do not pass through the"
-    " hook as edges of their own: their time is included in the"
-    " enclosing cumulative figure but gets no row.",
-    "Per-import timing overhead inflates every figure. Compare relative"
-    " sizes, against `python -X importtime` for example, and never treat"
-    " a millisecond figure as a wall-clock promise.",
-]
-
-
-def _edge(report: Report, edge_id: int | None) -> EdgeRecord | None:
-    """The edge record with the given id, when the report has one."""
-
-    if edge_id is None:
-        return None
-
-    for edge in report["edges"]:
-        if edge["id"] == edge_id:
-            return edge
-
-    return None
-
-
 def _who(edge: EdgeRecord) -> str:
     """The importer column: its module name or a placeholder."""
 
@@ -1081,7 +1427,7 @@ def _native_cell(edge: EdgeRecord) -> str:
     if edge["level"] == "function":
         return "n/a (2)"
 
-    return "yes" if edge["deferrable"]["native"] else "no"
+    return "yes" if edge["defer"]["native"] else "no"
 
 
 def _unwrapt_cell(edge: EdgeRecord) -> str:
@@ -1091,10 +1437,10 @@ def _unwrapt_cell(edge: EdgeRecord) -> str:
     if edge["level"] == "function":
         return "n/a (2)"
 
-    return "yes" if edge["deferrable"]["unwrapt"] else "no (1)"
+    return "yes" if edge["defer"]["unwrapt"] else "no (1)"
 
 
-def _notes(edge: EdgeRecord) -> str:
+def _notes(edge: EdgeRecord, shared: Sequence[str]) -> str:
     """The notes column: shared importers and already lazy declarations."""
 
     notes: list[str] = []
@@ -1102,36 +1448,11 @@ def _notes(edge: EdgeRecord) -> str:
     if edge["already_lazy"]:
         notes.append("already lazy")
 
-    others = edge["other_eager_importers"]
-
-    if others:
-        names = ", ".join(others)
-        notes.append(f"shared (+{len(others)}: {names})")
+    if shared:
+        names = ", ".join(shared)
+        notes.append(f"shared (+{len(shared)}: {names})")
 
     return "; ".join(notes)
-
-
-def _under_packages(importer: str | None, packages: list[str] | None) -> bool:
-    """Whether the importing module is one of the packages named by
-    the packages filter, or lives under one of them. Importers
-    outside them are treated as not editable and hidden."""
-
-    if packages is None:
-        return True
-
-    if importer is None:
-        return False
-
-    return any(
-        importer == package or importer.startswith(f"{package}.")
-        for package in packages
-    )
-
-
-def _loaded_modules(report: Report) -> set[str]:
-    """The top-level packages a report's loaded edges brought in."""
-
-    return {top_level(edge["imported"]) for edge in report["edges"] if edge["loaded"]}
 
 
 def _ms(value: float) -> str:
@@ -1163,10 +1484,3 @@ def _table(rows: Sequence[list[str]], left: Sequence[bool]) -> list[str]:
         lines.append("  " + "  ".join(cells).rstrip())
 
     return lines
-
-
-def _load_report(path: str) -> Report:
-    """Load a saved JSON profile report."""
-
-    with open(path, encoding="utf-8") as fp:
-        return cast(Report, json.load(fp))

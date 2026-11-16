@@ -15,6 +15,7 @@ from typing import Any
 from support import run_python, write_module
 
 import unwrapt
+from unwrapt.report import Report, summary
 
 PROFILE = {
     "UNWRAPT_PROFILE": "1",
@@ -205,11 +206,13 @@ def test_route_columns(tmp_path: Path) -> None:
         edge for edge in report["edges"] if edge["imported"] == "difflib"
     )
 
-    assert csv_edge["deferrable"] == {"native": True, "unwrapt": True}
-    assert csv_edge["unwrapt_limit"] is None
+    assert csv_edge["defer"] == {"native": True, "unwrapt": True, "reason": None}
 
-    assert difflib_edge["deferrable"] == {"native": True, "unwrapt": False}
-    assert difflib_edge["unwrapt_limit"] == "from-import"
+    assert difflib_edge["defer"] == {
+        "native": True,
+        "unwrapt": False,
+        "reason": "from-import",
+    }
 
 
 def test_dotted_as_edge_detected(tmp_path: Path) -> None:
@@ -232,8 +235,7 @@ def test_dotted_as_edge_detected(tmp_path: Path) -> None:
 
     edge = next(edge for edge in report["edges"] if edge["imported"] == "xml.dom")
 
-    assert edge["deferrable"] == {"native": True, "unwrapt": False}
-    assert edge["unwrapt_limit"] == "dotted-as"
+    assert edge["defer"] == {"native": True, "unwrapt": False, "reason": "dotted-as"}
 
 
 def test_min_ms_filter_hides_candidates(tmp_path: Path) -> None:
@@ -260,7 +262,7 @@ def test_min_ms_filter_hides_candidates(tmp_path: Path) -> None:
     # Every edge is still recorded; the filter is a display filter.
 
     assert any(edge["imported"] == "wave" for edge in report["edges"])
-    assert report["summary"]["filters"]["min_ms"] == 100000.0
+    assert report["filters"]["min_ms"] == 100000.0
 
 
 def test_output_path_expands_pid(tmp_path: Path) -> None:
@@ -312,7 +314,7 @@ def test_packages_filter(tmp_path: Path) -> None:
 
     report = _load(output)
 
-    assert report["summary"]["filters"]["packages"] == ["mypkg"]
+    assert report["filters"]["packages"] == ["mypkg"]
 
     # The wave imported by __main__ is outside the filter and the stdlib
     # importer of _csv is too; the render hides them. The JSON keeps
@@ -333,44 +335,149 @@ def test_json_schema_shape(tmp_path: Path) -> None:
         tmp_path,
     )
 
-    assert report["schema"] == 1
+    assert report["schema"] == 2
     assert report["unwrapt"] == unwrapt.__version__
     assert "python" in report
-    assert isinstance(report["total_import_ms"], float)
-    assert isinstance(report["summary"]["modules_loaded"], int)
-    assert isinstance(report["summary"]["edge_count"], int)
-    assert isinstance(report["summary"]["estimated_saving_ms"], float)
-    assert report["summary"]["estimate_note"]
+    assert report["labels"] == {}
+    assert report["label_sets"] == [{}]
+    assert report["filters"] == {"min_ms": 0.0, "packages": None}
     assert isinstance(report["edges"], list)
-    assert isinstance(report["heavy_modules"], list)
-    assert isinstance(report["chains"], list)
-    assert isinstance(report["by_importer"], list)
-    assert report["deferred_unused"] == []
-    assert report["deferred_used"] == []
 
-    edge = report["edges"][0]
+    # Facts only: the analysis is computed from them, not stored.
 
-    for field in (
+    assert set(report) == {
+        "schema",
+        "unwrapt",
+        "python",
+        "labels",
+        "label_sets",
+        "filters",
+        "edges",
+    }
+
+    edge = next(edge for edge in report["edges"] if edge["imported"] == "wave")
+
+    assert set(edge) == {
         "id",
         "parent_id",
-        "imported",
         "importer",
+        "imported",
+        "file",
         "line",
         "kind",
         "level",
+        "relative",
         "loaded",
+        "count",
         "cum_ms",
         "self_ms",
-        "deferrable",
-        "unwrapt_limit",
+        "defer",
         "already_lazy",
         "native_lazy",
         "deferred",
+        "resolution",
         "resolves",
         "used_in",
-        "other_eager_importers",
-    ):
-        assert field in edge
+        "labels",
+    }
+    assert edge["file"] == "<string>"
+    assert edge["count"] == 1
+
+
+def test_repeated_hits_are_folded(tmp_path: Path) -> None:
+    report = _report_facts(
+        """
+        import unwrapt
+
+        unwrapt.install_from_env()
+
+        import wave
+
+        def again():
+            import wave
+
+        for _ in range(500):
+            again()
+        """,
+        tmp_path,
+    )
+
+    waves = [edge for edge in report["edges"] if edge["imported"] == "wave"]
+
+    # The load is kept as it is, and the 500 hits from the function are
+    # one folded edge with their count and summed time.
+
+    assert len(waves) == 2
+
+    loaded = next(edge for edge in waves if edge["loaded"])
+    folded = next(edge for edge in waves if not edge["loaded"])
+
+    assert loaded["count"] == 1
+    assert folded["count"] == 500
+    assert folded["level"] == "function"
+    assert folded["defer"]["reason"] == "function-level"
+    assert folded["cum_ms"] >= 0.0
+
+
+def test_relative_import_is_flagged(tmp_path: Path) -> None:
+    write_module(tmp_path, "mypkg.__init__", "from . import sub\n")
+    write_module(tmp_path, "mypkg.sub", "VALUE = 1\n")
+
+    report = _report_facts(
+        """
+        import unwrapt
+
+        unwrapt.install_from_env()
+
+        import mypkg
+        """,
+        tmp_path,
+    )
+
+    edge = next(
+        edge
+        for edge in report["edges"]
+        if edge["importer"] == "mypkg" and edge["relative"]
+    )
+
+    assert edge["defer"] == {"native": True, "unwrapt": False, "reason": "relative"}
+
+
+def test_scoped_labels_are_recorded(tmp_path: Path) -> None:
+    report = _report_facts(
+        """
+        import unwrapt
+
+        unwrapt.install_from_env()
+
+        with unwrapt.scope(entrypoint="hooks"):
+            import wave
+
+            token = unwrapt.push_scope(role="inner")
+
+            import difflib
+
+            unwrapt.pop_scope(token)
+
+        import plistlib
+        """,
+        tmp_path,
+    )
+
+    sets = report["label_sets"]
+
+    def labels_of(name: str) -> dict[str, str]:
+        found = next(edge for edge in report["edges"] if edge["imported"] == name)
+
+        result: dict[str, str] = sets[found["labels"]]
+
+        return result
+
+    # Nested scopes merge, and the labels end with their scope.
+
+    assert labels_of("wave") == {"entrypoint": "hooks"}
+    assert labels_of("difflib") == {"entrypoint": "hooks", "role": "inner"}
+    assert labels_of("plistlib") == {}
 
 
 def test_summary_figures_are_sane(tmp_path: Path) -> None:
@@ -386,11 +493,11 @@ def test_summary_figures_are_sane(tmp_path: Path) -> None:
         tmp_path,
     )
 
-    summary = report["summary"]
+    figures = summary(Report.from_dict(report))
 
     # Non-additivity: the estimate can never exceed the total.
 
-    assert summary["estimated_saving_ms"] <= report["total_import_ms"]
+    assert figures["estimated_saving_ms"] <= figures["total_import_ms"]
 
 
 def test_text_report_default_output(tmp_path: Path) -> None:
@@ -444,4 +551,4 @@ def test_install_twice_installs_once(tmp_path: Path) -> None:
 
     report = _load(output)
 
-    assert report["summary"]["edge_count"] > 0
+    assert len(report["edges"]) > 0

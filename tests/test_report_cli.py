@@ -6,51 +6,31 @@ from pathlib import Path
 import pytest
 
 import unwrapt
-from unwrapt._report import main
+from unwrapt._config import ProfileOptions
+from unwrapt._report import Edge, build_report, main
 
 
 def _write_report(path: Path, total: float, modules: list[str]) -> str:
-    report = {
-        "schema": 1,
-        "unwrapt": unwrapt.__version__,
-        "python": "3.14.0",
-        "total_import_ms": total,
-        "summary": {
-            "modules_loaded": len(modules),
-            "edge_count": len(modules),
-            "best_cut": None,
-            "estimated_saving_ms": 0.0,
-            "estimate_note": "conservative; edge times nest and are not additive",
-            "filters": {"min_ms": 0.0, "packages": None},
-        },
-        "edges": [
-            {
-                "id": index,
-                "parent_id": None,
-                "imported": name,
-                "importer": "app",
-                "line": index + 1,
-                "kind": "import",
-                "level": "module",
-                "loaded": True,
-                "cum_ms": total / len(modules),
-                "self_ms": total / len(modules),
-                "deferrable": {"native": True, "unwrapt": True},
-                "unwrapt_limit": None,
-                "already_lazy": False,
-                "native_lazy": False,
-                "other_eager_importers": [],
-            }
-            for index, name in enumerate(modules)
-        ],
-        "heavy_modules": [
-            {"module": name, "self_ms": total / len(modules)} for name in modules
-        ],
-        "chains": [],
-        "by_importer": [{"importer": "app", "cum_ms": total}],
-    }
+    edges = [
+        Edge(
+            id=index,
+            parent_id=None,
+            importer="app",
+            imported=name,
+            kind="import",
+            level_name="module",
+            line=index + 1,
+            file=None,
+            loaded=True,
+            cum_ms=total / len(modules),
+            self_ms=total / len(modules),
+            native_lazy=False,
+            already_lazy=False,
+        )
+        for index, name in enumerate(modules)
+    ]
 
-    path.write_text(json.dumps(report))
+    path.write_text(build_report(edges, ProfileOptions()).render_json())
 
     return str(path)
 
@@ -97,3 +77,13 @@ def test_main_invalid_json_fails(tmp_path: Path) -> None:
     path.write_text("{oops")
 
     assert main([str(path)]) == 1
+
+
+def test_main_refuses_another_schema(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    path = tmp_path / "old.json"
+    path.write_text(json.dumps({"schema": 1, "edges": []}))
+
+    assert main([str(path)]) == 1
+    assert "schema 1 is not supported" in capsys.readouterr().err

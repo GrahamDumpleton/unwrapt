@@ -72,8 +72,9 @@ hits, one edge is recorded:
 
 - the importing module and the imported name;
 
-- whether it was an `import` or a `from` form, and whether the
-  statement sat at module, function or class level;
+- whether it was an `import` or a `from` form, whether it was
+  relative, and whether the statement sat at module, function or
+  class level;
 
 - the statement's file and line, when the call was made from Python;
 
@@ -86,7 +87,41 @@ hits, one edge is recorded:
   separates a module's own cost from the cost of what it pulls in;
 
 - the ids linking each edge to the import call it happened inside,
-  which is how the report builds the tree and the chains.
+  which is how the report builds the tree and the chains;
+
+- the labels in force when the statement ran, as an index into the
+  report's table of label sets.
+
+Repeated already-loaded hits, which make up most of the tens of
+thousands of import calls a large application makes, are folded in
+memory into one edge per importer, module and label set, with a count.
+Nothing is pruned: every edge that loaded a module is kept, and the
+`min_ms` and `packages` thresholds apply only when the report is
+rendered.
+
+## Labels
+
+A host that loads several entry points can label each, so the report
+says which entry point needed which module:
+
+```python
+import unwrapt
+
+with unwrapt.scope(entrypoint="hooks"):
+    import shop.hooks
+
+with unwrapt.scope(entrypoint="mount:api"):
+    import shop.api
+```
+
+The cost of a module shared by both stays with the first load, under
+`entrypoint=hooks`, while the already-loaded edges under
+`entrypoint=mount:api` show that the API needs it too.
+`unwrapt.push_scope()` and `unwrapt.pop_scope()` do the same for a
+caller that brackets the work with two callbacks. Labels describing
+the whole report go on the `Report` itself, before it is stored:
+`report.labels.update(role="host", outcome="fork")`. See the
+[API](api.md#unwraptscope).
 
 A module the shim deferred is loaded at first use through
 `importlib.import_module`, which does not pass through

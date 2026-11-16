@@ -14,7 +14,8 @@ from typing import Any
 import pytest
 from support import run_python
 
-from unwrapt._report import main as report_main
+from unwrapt.report import Report, candidates, chains, summary
+from unwrapt.report import main as report_main
 
 EXAMPLE = Path(__file__).parent.parent / "examples" / "worked-example"
 
@@ -81,8 +82,11 @@ def test_baseline_report_structure(tmp_path: Path) -> None:
 
     difflib_edge = by_imported["difflib"]
 
-    assert difflib_edge["deferrable"] == {"native": True, "unwrapt": False}
-    assert difflib_edge["unwrapt_limit"] == "from-import"
+    assert difflib_edge["defer"] == {
+        "native": True,
+        "unwrapt": False,
+        "reason": "from-import",
+    }
 
     # xml.dom is imported twice: once by the entry point, once inside
     # the chain, so the shared note lists the other eager importer.
@@ -92,18 +96,20 @@ def test_baseline_report_structure(tmp_path: Path) -> None:
     assert len(dom_edges) == 2
     assert dom_edges[0]["loaded"] is True
 
-    for edge in dom_edges:
-        assert len(edge["other_eager_importers"]) == 1
+    loaded = Report.from_dict(report)
+    rows = {row["edge"]: row for row in candidates(loaded)}
+
+    assert len(rows[dom_edges[0]["id"]]["shared"]) == 1
 
     # The chain for xml explains why it loaded, outermost first.
 
-    chains = {chain["module"]: chain for chain in report["chains"]}
-
-    assert "xml" in chains
+    assert "xml" in {item["module"] for item in chains(loaded)}
 
     # The estimate never exceeds the total, whatever the nest.
 
-    assert report["summary"]["estimated_saving_ms"] <= report["total_import_ms"]
+    figures = summary(loaded)
+
+    assert figures["estimated_saving_ms"] <= figures["total_import_ms"]
 
 
 def test_config_route_defers_the_decisions(tmp_path: Path) -> None:
@@ -166,8 +172,8 @@ def test_compare_tool_reports_the_change(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
     # The compare tool is for diffing two profiled runs: after a code
-    # change, or between workloads. Profile mode never defers, so the
-    # honest demo is a changed workload, not the same one with a
+    # change, or between workloads. An eager profile never defers, so
+    # the honest demo is a changed workload, not the same one with a
     # configuration (which the shim-run test covers: deferral under
     # the shim, verified directly).
 

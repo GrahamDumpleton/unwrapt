@@ -22,6 +22,7 @@ def test_public_api_surface() -> None:
         "Deferral",
         "Installed",
         "ProfileOptions",
+        "Report",
         "Resolution",
         "__version__",
         "__version_info__",
@@ -33,6 +34,9 @@ def test_public_api_surface() -> None:
         "is_installed",
         "load_config",
         "on_resolve",
+        "pop_scope",
+        "push_scope",
+        "scope",
         "stop_profile",
         "uninstall",
     ]

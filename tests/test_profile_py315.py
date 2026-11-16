@@ -9,11 +9,11 @@ These tests are collected only on 3.15+.
 
 import json
 from pathlib import Path
-from typing import Any, cast
+from typing import Any
 
 from support import run_python
 
-from unwrapt._report import Report, render_text
+from unwrapt.report import Report
 
 PROFILE = {
     "UNWRAPT_PROFILE": "1",
@@ -62,7 +62,7 @@ def test_native_lazy_import_recorded_at_first_use(tmp_path: Path) -> None:
     assert csv_edge["loaded"] is True
     assert csv_edge["importer"] == "__main__"
 
-    text = render_text(cast(Report, report))
+    text = Report.from_dict(report).render_text()
 
     assert "native lazy imports on Python 3.15" in text
     assert "recorded at first use" in text

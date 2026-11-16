@@ -28,27 +28,59 @@ import threading
 import time
 import types
 from collections.abc import Callable, Mapping, Sequence
+from dataclasses import replace
 from typing import Literal, TypeAlias, cast
 
+from unwrapt import _labels
 from unwrapt._compat import has_native_lazy_imports, mark_profile
 from unwrapt._config import Config, ProfileOptions, is_candidate, is_native_pending
 from unwrapt._records import Resolution
-from unwrapt._report import Edge, Report, build_report, render_json, render_text
+from unwrapt._report import Edge, Report, build_report
 
 ImportFunction = Callable[..., types.ModuleType]
 
 # Each entry of a thread's stack of in-progress import calls holds the
-# id of the call (which is the parent_id of anything it imports) and a
-# one-cell accumulator for the time spent in nested import calls (which
-# turns cumulative time into self time).
+# id of the call (which is the parent_id of anything it imports) and an
+# accumulator of the time spent in nested import calls (which turns
+# cumulative time into self time) and of how many there were (which
+# says whether the call can be folded).
 
 _StackEntry: TypeAlias = tuple[int, list[float]]
+
+# A folded run of already-loaded hits is keyed by importer, module and
+# label set, and by the form facts the analysis reads (kind, level,
+# relative), and by whether the hits were outermost, so that the
+# folded times still add up to the total import time.
+
+_FoldKey: TypeAlias = tuple[str | None, str, int, str, str, bool, bool]
+
+
+class _Fold:
+    """Repeated already-loaded hits, folded: the first hit and the sums."""
+
+    __slots__ = ("count", "cum_ms", "first", "self_ms")
+
+    def __init__(self, first: Edge) -> None:
+        self.first = first
+        self.count = 0
+        self.cum_ms = 0.0
+        self.self_ms = 0.0
+
+    def edge(self) -> Edge:
+        """The folded edge: the first hit, with the count and the sums."""
+
+        return replace(
+            self.first,
+            count=self.count,
+            cum_ms=self.cum_ms,
+            self_ms=self.self_ms,
+        )
 
 
 class _ResolveToken:
     """The state of one resolve between begin_resolve and end_resolve."""
 
-    __slots__ = ("child_time", "edge_id", "parent_id", "start")
+    __slots__ = ("child_time", "edge_id", "labels", "parent_id", "start")
 
     def __init__(
         self,
@@ -61,6 +93,7 @@ class _ResolveToken:
         self.parent_id = parent_id
         self.child_time = child_time
         self.start = start
+        self.labels = _labels.current
 
 
 class Recorder:
@@ -74,6 +107,12 @@ class Recorder:
     of the edge that recorded the deferral, so a later resolve can be
     tied back to it.
 
+    Repeated already-loaded hits, which make up most of the import
+    calls a large application makes, are folded into folds rather than
+    kept one edge each. Nothing is pruned: every edge that loaded a
+    module, was deferred or resolved, or made nested import calls is
+    kept as it is.
+
     One lock guards the state shared across threads, the edge id counter
     and the edge list: import calls can be made from any thread,
     including concurrently on a free-threaded build. The stack of
@@ -86,6 +125,7 @@ class Recorder:
         "config",
         "deferred_edges",
         "edges",
+        "folds",
         "hook",
         "local",
         "lock",
@@ -107,6 +147,7 @@ class Recorder:
         self.lock = threading.Lock()
         self.next_id = 0
         self.edges: list[Edge] = []
+        self.folds: dict[_FoldKey, _Fold] = {}
         self.deferred_edges: dict[object, int] = {}
         self.local = threading.local()
         self.hook: ImportFunction = _make_hook(self)
@@ -139,7 +180,7 @@ class Recorder:
             edge_id = self.next_id
             self.next_id += 1
 
-        child_time = [0.0]
+        child_time = [0.0, 0.0]
         stack.append((edge_id, child_time))
 
         return _ResolveToken(edge_id, parent_id, child_time, time.perf_counter())
@@ -168,6 +209,7 @@ class Recorder:
 
         if stack:
             stack[-1][1][0] += elapsed
+            stack[-1][1][1] += 1.0
 
         if resolution is None or not self.active:
             return
@@ -188,6 +230,7 @@ class Recorder:
             already_lazy=True,
             resolves=self.deferred_edges.get(record),
             used_in=resolution.used_in,
+            labels=state.labels,
         )
 
         with self.lock:
@@ -264,7 +307,7 @@ def install_profile(config: Config, shim_local: threading.local | None) -> bool:
     return True
 
 
-def stop_profile(write: bool) -> Report | None:
+def stop_profile(write: bool) -> "Report | None":
     """Stop the recorder and return its report, or None when none runs.
 
     The exit handler is unregistered first, so the report is never
@@ -314,11 +357,13 @@ def _stop(recorder: Recorder, write: bool) -> Report:
 
     with recorder.lock:
         edges = list(recorder.edges)
+        edges.extend(fold.edge() for fold in recorder.folds.values())
         recorder.edges.clear()
+        recorder.folds.clear()
         recorder.deferred_edges.clear()
 
     options = recorder.config.profile
-    report = build_report(edges, options)
+    report = build_report(edges, options, _labels.label_sets())
 
     if write:
         _write(report, options)
@@ -336,9 +381,9 @@ def _write(report: Report, options: ProfileOptions) -> None:
 
     try:
         if options.format == "json":
-            text = render_json(report)
+            text = report.render_json()
         else:
-            text = render_text(report)
+            text = report.render_text()
 
         if options.output is None:
             print(text, file=sys.stderr)
@@ -382,6 +427,7 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
     local = recorder.local
     lock = recorder.lock
     edges = recorder.edges
+    folds = recorder.folds
     config = recorder.config
 
     def _profiling_import(
@@ -424,7 +470,8 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
             parent_id = stack[-1][0] if stack else None
 
             before = len(sys.modules)
-            child_time = [0.0]
+            child_time = [0.0, 0.0]
+            labels = _labels.current
 
             # The importing frame is one level up: the hook is a plain
             # function called directly by the eval loop, with no wrapper
@@ -485,8 +532,10 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
 
                 if stack:
                     stack[-1][1][0] += elapsed
+                    stack[-1][1][1] += 1.0
 
                 importer = _importer_name(globals)
+                loaded = len(sys.modules) != before
 
                 edge = Edge(
                     id=edge_id,
@@ -497,7 +546,7 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
                     level_name=_import_level(locals, globals),
                     line=line,
                     file=file,
-                    loaded=len(sys.modules) != before,
+                    loaded=loaded,
                     cum_ms=elapsed,
                     self_ms=elapsed - child_time[0],
                     native_lazy=native_lazy,
@@ -508,10 +557,43 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
                         else False
                     ),
                     deferred=record is not None,
+                    relative=level > 0,
+                    labels=labels,
                 )
 
-                with lock:
-                    edges.append(edge)
+                # An already-loaded hit with nothing nested beneath it
+                # folds into the run of hits like it. Anything else, a
+                # load, a deferral, a native reification or a call with
+                # nested imports, is kept as its own edge.
+
+                if (
+                    not loaded
+                    and record is None
+                    and not native_lazy
+                    and child_time[1] == 0.0
+                ):
+                    key = (
+                        importer,
+                        name,
+                        labels,
+                        edge.kind,
+                        edge.level_name,
+                        edge.relative,
+                        parent_id is None,
+                    )
+
+                    with lock:
+                        fold = folds.get(key)
+
+                        if fold is None:
+                            fold = folds[key] = _Fold(edge)
+
+                        fold.count += 1
+                        fold.cum_ms += edge.cum_ms
+                        fold.self_ms += edge.self_ms
+                else:
+                    with lock:
+                        edges.append(edge)
         finally:
             local.reentrant = False
 

@@ -106,3 +106,32 @@ the rest of the documentation, starting with
   module's own imports nested beneath it, and the report gains two
   sections: deferred but used anyway, and deferred and never used. See
   [reading the report](reading-the-report.md#deferral-sections).
+
+- **The profile report is versioned data, with labels.**
+  `stop_profile(write=False)` returns a `Report`, whose `to_dict()` is
+  schema 2 of the JSON form, documented field by field on
+  [reading the report](reading-the-report.md#the-json-form). The JSON
+  holds facts only: each edge now carries its statement's file,
+  whether it was relative, a `count`, a `defer` object (whether each
+  route can defer it, and if the shim cannot, why: `function-level`,
+  `class-level`, `relative`, `from-import`, `dotted-as` or
+  `already-loaded`), the `resolution` of a deferred import, and the
+  label set in force. `report.labels` holds the caller's own labels,
+  and `unwrapt.scope()`, or `unwrapt.push_scope()` and
+  `unwrapt.pop_scope()`, label the code being loaded. Schema 1
+  reports are not read; profile again.
+
+- **Repeated already-loaded hits are folded** in memory into one edge
+  per importer, module and label set, with a count. Nothing is
+  pruned, and the display thresholds apply only when the report is
+  rendered: `render_text(min_ms=..., packages=...)` overrides them.
+
+- **The analysis is a set of functions** in `unwrapt.report`:
+  `summary()`, `who_pays()`, `candidates()` (now with each
+  candidate's own saving), `chain()` and `chains()`, `heavy_modules()`,
+  `by_importer()`, `deferred_used()`, `deferred_unused()` and
+  `compare_reports()`, plus `load_report()`. The derived sections
+  (summary, heavy modules, chains, by importer, the shared importers
+  and the deferral lists) are no longer stored in the JSON. The text
+  report shows the report's labels and the import calls behind the
+  edges, and marks relative imports as not deferrable by the shim.
