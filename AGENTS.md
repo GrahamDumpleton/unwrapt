@@ -7,8 +7,8 @@ first use, without changing application code. Below Python 3.15 it
 emulates the `__lazy_modules__` mechanism of PEP 810 by replacing
 `builtins.__import__` with a hook that returns a lazy proxy for each
 marked import; from 3.15, where the interpreter provides the mechanism
-natively, it applies only an external JSON configuration of extra
-deferrals. A profile mode reports what an application's imports cost
+natively, it applies only an external TOML or JSON configuration of
+extra deferrals. A profile mode reports what an application's imports cost
 and what is worth deferring. It builds on wrapt (2.4.1+), is designed
 to be injected with autowrapt, and is a sibling project to wrapt and
 autowrapt. See README.md for the project goals.
@@ -142,7 +142,8 @@ the underlying commands yourself; run `just --list` to see everything.
 - On Python 3.15 and later, unwrapt never reads a module's own
   `__lazy_modules__` and never alters native behaviour (no calls to
   sys.set_lazy_imports or its filter): it applies only the external
-  configuration, and installs nothing when there is none.
+  TOML or JSON configuration's `lazy_modules`, and installs nothing
+  when that has no entries.
 
 - Whole-module imports only. `from x import y` and `import a.b as c`
   stay eager under the shim on every version, and are documented as

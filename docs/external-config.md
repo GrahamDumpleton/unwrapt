@@ -2,9 +2,22 @@
 
 The external configuration defers imports in modules whose source you
 do not control, or do not want to edit: third-party code, a vendored
-package, your own modules while experimenting. It is a JSON file named
-by `UNWRAPT_CONFIG`, mapping each importer's module name to the
-module names that importer should defer:
+package, your own modules while experimenting. It is the
+`lazy_modules` table of the [configuration file](configuration.md),
+mapping each importer's module name to the module names that importer
+should defer:
+
+```toml
+# unwrapt.toml
+
+[lazy_modules]
+"thirdparty.pkg.client" = ["numpy", "pandas"]
+"myapp.cli" = ["sqlite3"]
+```
+
+In a `pyproject.toml` the table is `[tool.unwrapt.lazy_modules]`. The
+same mapping can also be a JSON file named by `UNWRAPT_CONFIG`, the
+form that holds only the deferrals:
 
 ```json
 {
@@ -12,6 +25,9 @@ module names that importer should defer:
     "myapp.cli": ["sqlite3"]
 }
 ```
+
+The [configuration](configuration.md) page says where the file is
+found.
 
 ## The rules
 
@@ -31,22 +47,22 @@ module names that importer should defer:
 
 - Below Python 3.15 the sources union: an import is deferred if either
   the configuration or the module's own `__lazy_modules__` names it,
-  unless `UNWRAPT_CONFIG_ONLY` restricts it to the configuration.
+  unless `config_only` restricts it to the configuration.
 
 - From Python 3.15 the configuration is the only source, always: the
   interpreter handles `__lazy_modules__` itself and unwrapt never
-  reads it. Supplying the configuration is what activates unwrapt
-  there. See [Python 3.15](python-3-15.md), including the one rule
-  about not duplicating names the code already imports with an
-  explicit `lazy import` statement.
+  reads it. Having entries is what activates unwrapt there. See
+  [Python 3.15](python-3-15.md), including the one rule about not
+  duplicating names the code already imports with an explicit
+  `lazy import` statement.
 
 ## Errors
 
-A missing, unreadable or malformed file warns once on stderr and
-continues without it: unwrapt must not stop the host application from
-starting. Within a valid file, entries that are not the right shape
-(an importer name that is not a string, a value that is not a list of
-strings) are skipped with a warning and the rest are kept.
+A file that is missing, unreadable or malformed, or that has an entry
+of the wrong shape (an importer whose value is not a list of module
+names), is an error. Through the bootstrap the error warns once on
+stderr and the process starts without the file: unwrapt must not stop
+the host application from starting.
 
 ## What it is for
 

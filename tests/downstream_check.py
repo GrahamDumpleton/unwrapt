@@ -8,6 +8,7 @@ py.typed promises.
 """
 
 import importlib.metadata
+from collections.abc import Callable
 
 import unwrapt
 
@@ -21,3 +22,13 @@ distribution_version: str = importlib.metadata.version("unwrapt")
 
 if distribution_version != version:
     raise RuntimeError("version mismatch")
+
+# The configuration API loads through the package's module __getattr__,
+# and must still be visible to a downstream type checker.
+
+config: unwrapt.Config = unwrapt.Config(lazy_modules={"shop.web": ["decimal"]})
+options: unwrapt.ProfileOptions = config.profile
+found: str | None = unwrapt.find_config()
+loaded: unwrapt.Config = unwrapt.load_config(found)
+error: type[Exception] = unwrapt.ConfigError
+install_from_env: Callable[[], bool] = unwrapt.install_from_env

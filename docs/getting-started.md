@@ -110,19 +110,22 @@ importing unwrapt alone never installs anything.
 ## Deferring an import you cannot edit
 
 The same deferral works on modules whose source you do not control,
-through a JSON configuration. Write one:
+through a configuration file. Write one:
 
-```json
-{
-    "__main__": ["decimal"]
-}
+```toml
+# unwrapt.toml
+
+[lazy_modules]
+"__main__" = ["decimal"]
 ```
 
-Save it as `lazy.json` beside an application that imports decimal,
+Save it as `unwrapt.toml` beside an application that imports decimal,
 with no mention of laziness anywhere in the application:
 
 ```python
 # eagerapp.py
+
+import sys
 
 import decimal
 
@@ -134,14 +137,17 @@ print("loaded after use:", "decimal" in sys.modules)
 ```
 
 ```console
-$ AUTOWRAPT_BOOTSTRAP=unwrapt UNWRAPT_CONFIG=lazy.json python eagerapp.py
+$ AUTOWRAPT_BOOTSTRAP=unwrapt python eagerapp.py
 loaded at startup: False
 loaded after use: True
 ```
 
-The configuration maps each importer's module name to the names it
-should defer; see the [external configuration](external-config.md)
-page for the format and rules.
+unwrapt finds `unwrapt.toml` in the current directory, or a
+`[tool.unwrapt]` table in `pyproject.toml`, with no variable to set.
+The `lazy_modules` table maps each importer's module name to the
+names it should defer; see the
+[external configuration](external-config.md) page for the rules, and
+[configuration](configuration.md) for the rest of the file.
 
 ## Finding what is worth deferring
 

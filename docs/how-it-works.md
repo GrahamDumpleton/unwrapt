@@ -68,7 +68,7 @@ not cover it and a listed `xml.dom` does not cover `import xml`.
 
 Below 3.15, either source makes an import a candidate: the module's
 own `__lazy_modules__` or the external configuration. With
-`UNWRAPT_CONFIG_ONLY` set, only the configuration is consulted, which
+`config_only` set, only the configuration is consulted, which
 is the A/B switch for experiments. From 3.15 the configuration is the
 only source, always.
 
@@ -150,7 +150,7 @@ the statement to first use. Do not list those; the
 
 | Python | What the shim defers | What it never does |
 | --- | --- | --- |
-| 3.11 to 3.14 | `__lazy_modules__` plus the external configuration (or the configuration alone with `UNWRAPT_CONFIG_ONLY`) | read native controls that do not exist there |
+| 3.11 to 3.14 | `__lazy_modules__` plus the external configuration (or the configuration alone with `config_only`) | read native controls that do not exist there |
 | 3.15 and later | the external configuration only | read `__lazy_modules__`, call `sys.set_lazy_imports` or its filter, alter native behaviour in any way |
 
 From 3.15, with no configuration there is nothing for unwrapt to do,

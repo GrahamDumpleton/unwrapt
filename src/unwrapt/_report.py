@@ -27,7 +27,7 @@ from dataclasses import dataclass
 from typing import Literal, TypedDict, cast
 
 from unwrapt import __version__
-from unwrapt._config import Settings
+from unwrapt._config import ProfileOptions
 
 # How many heavy modules get an import chain in the report.
 _CHAIN_LIMIT = 8
@@ -175,8 +175,12 @@ def top_level(name: str) -> str:
     return name.partition(".")[0]
 
 
-def build_report(edges: Sequence[Edge], settings: Settings) -> Report:
-    """Aggregate recorded edges into the report structure."""
+def build_report(edges: Sequence[Edge], options: ProfileOptions) -> Report:
+    """Aggregate recorded edges into the report structure.
+
+    options supplies the display filters, which are stored in the
+    report for the text renderer and never drop an edge.
+    """
 
     classified = [_classify(edge) for edge in edges]
     by_id = {item.edge.id: item for item in classified}
@@ -210,9 +214,9 @@ def build_report(edges: Sequence[Edge], settings: Settings) -> Report:
             estimated_saving_ms=estimated_saving,
             estimate_note=_ESTIMATE_NOTE,
             filters=ReportFilters(
-                min_ms=settings.profile_min_ms,
-                packages=list(settings.profile_packages)
-                if settings.profile_packages is not None
+                min_ms=options.min_ms,
+                packages=list(options.packages)
+                if options.packages is not None
                 else None,
             ),
         ),
@@ -284,11 +288,11 @@ def render_text(report: Report) -> str:
     lines.append("Candidates: module-level imports, ranked by cumulative time")
 
     if min_ms > 0.0:
-        lines.append(f"(rows under {_ms(min_ms)} ms hidden by UNWRAPT_PROFILE_MIN_MS)")
+        lines.append(f"(rows under {_ms(min_ms)} ms hidden by the min_ms filter)")
 
     if packages is not None:
         names = ", ".join(packages)
-        lines.append(f"(rows outside {names} hidden by UNWRAPT_PROFILE_PACKAGES)")
+        lines.append(f"(rows outside {names} hidden by the packages filter)")
 
     rows = [
         edge
@@ -965,7 +969,7 @@ def _notes(edge: EdgeRecord) -> str:
 
 def _under_packages(importer: str | None, packages: list[str] | None) -> bool:
     """Whether the importing module is one of the packages named by
-    UNWRAPT_PROFILE_PACKAGES, or lives under one of them. Importers
+    the packages filter, or lives under one of them. Importers
     outside them are treated as not editable and hidden."""
 
     if packages is None:

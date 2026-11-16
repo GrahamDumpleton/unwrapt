@@ -28,16 +28,16 @@ from unwrapt._compat import (
     is_installed,
     mark_installed,
 )
-from unwrapt._config import Settings, is_candidate, is_native_pending
+from unwrapt._config import Config, is_candidate, is_native_pending
 from unwrapt._report import Edge, build_report, render_json, render_text
 
 # The import function that was installed when the hook went in.
 
 _original_import: Callable[..., types.ModuleType] | None = None
 
-# The settings the hook was installed with.
+# The configuration the hook was installed with.
 
-_settings: Settings | None = None
+_config: Config | None = None
 
 # One lock guards the two pieces of state shared across threads: the
 # edge id counter and the edge list. Import calls can be made from any
@@ -59,7 +59,7 @@ _local = threading.local()
 _StackEntry: TypeAlias = tuple[int, list[float]]
 
 
-def install_profile(settings: Settings) -> bool:
+def install_profile(config: Config) -> bool:
     """Install the profile mode recording hook.
 
     Deferral is not part of profile mode, whatever the configuration
@@ -75,14 +75,14 @@ def install_profile(settings: Settings) -> bool:
 
     The report is written at process exit. Worker process setups (a
     mod_wsgi daemon process, for example) may not run exit handlers
-    reliably, so UNWRAPT_PROFILE_OUTPUT is the recommended way to get
-    the report, with %p in the path expanding to the process id.
+    reliably, so an output path is the recommended way to get the
+    report, with %p in the path expanding to the process id.
 
     Returns True when this call installed the hook, False when a hook
     was already installed.
     """
 
-    global _original_import, _settings
+    global _original_import, _config
 
     if is_installed():
         return False
@@ -103,14 +103,14 @@ def install_profile(settings: Settings) -> bool:
             file=sys.stderr,
         )
 
-    _settings = settings
+    _config = config
     _original_import = builtins.__import__
     builtins.__import__ = _profiling_import
     mark_installed("profile")
 
     atexit.register(_write_report)
 
-    if settings.debug:
+    if config.debug:
         print("unwrapt: profile mode installed", file=sys.stderr)
 
     return True
@@ -138,7 +138,7 @@ def _profiling_import(
 
     global _next_id
 
-    assert _original_import is not None and _settings is not None
+    assert _original_import is not None and _config is not None
 
     if getattr(_local, "reentrant", False):
         return _original_import(name, globals, locals, fromlist, level)
@@ -223,7 +223,7 @@ def _profiling_import(
                 native_lazy=native_lazy,
                 already_lazy=native_lazy
                 or (
-                    is_candidate(name, globals, _settings)
+                    is_candidate(name, globals, _config)
                     if globals is not None
                     else False
                 ),
@@ -277,9 +277,9 @@ def _write_report() -> None:
     of the host application.
     """
 
-    assert _original_import is not None and _settings is not None
+    assert _original_import is not None and _config is not None
 
-    settings = _settings
+    options = _config.profile
 
     try:
         builtins.__import__ = _original_import
@@ -287,14 +287,14 @@ def _write_report() -> None:
         with _lock:
             edges = list(_edges)
 
-        report = build_report(edges, settings)
+        report = build_report(edges, options)
 
-        if settings.profile_format == "json":
+        if options.format == "json":
             text = render_json(report)
         else:
             text = render_text(report)
 
-        output = settings.profile_output
+        output = options.output
 
         if output is None:
             print(text, file=sys.stderr)

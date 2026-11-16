@@ -98,12 +98,13 @@ interpreter does all of this natively and unwrapt is not involved.
   import wrappers were already installed, cheap on the pass-through
   path, and never raising from its own bookkeeping.
 
-- **Wrapping things you can't edit.** A JSON configuration names
-  imports to defer in modules whose source you do not control:
-  `UNWRAPT_CONFIG=lazy.json`. On Python 3.15 and later this is the
-  only thing unwrapt does: the interpreter handles `__lazy_modules__`
-  natively, unwrapt never touches it or native behaviour, and with no
-  configuration it installs nothing at all.
+- **Wrapping things you can't edit.** A configuration file names
+  imports to defer in modules whose source you do not control: an
+  `unwrapt.toml`, a `[tool.unwrapt]` table in `pyproject.toml`, or a
+  JSON file named by `UNWRAPT_CONFIG`. On Python 3.15 and later this
+  is the only thing unwrapt does: the interpreter handles
+  `__lazy_modules__` natively, unwrapt never touches it or native
+  behaviour, and with nothing configured it installs nothing at all.
 
 - **Peeking at the label.** `UNWRAPT_DEBUG=1` logs each deferred
   import to stderr, and the active mode at startup.

@@ -299,7 +299,7 @@ def test_missing_config_file_warns_and_continues(tmp_path: Path) -> None:
         env={"UNWRAPT_CONFIG": str(tmp_path / "nope.json")},
     )
 
-    assert "UNWRAPT_CONFIG file" in process.stderr
+    assert "nope.json" in process.stderr
     assert "does not exist" in process.stderr
 
     # Below 3.15 an empty configuration still installs the hook (the

@@ -8,8 +8,8 @@ that returns a wrapt.LazyObjectProxy for each deferred import and
 chains everything else to the import function it replaced, so import
 wrappers installed before unwrapt keep working. From Python 3.15 the
 interpreter handles __lazy_modules__ natively and the hook's only job
-is the external configuration, in external-config-only mode: it
-installs nothing when there is none.
+is the configuration's lazy_modules, in external-config-only mode:
+it installs nothing when there are no entries.
 """
 
 import builtins
@@ -26,7 +26,7 @@ from unwrapt._compat import (
     is_installed,
     mark_installed,
 )
-from unwrapt._config import Settings, is_candidate, is_native_pending
+from unwrapt._config import Config, is_candidate, is_native_pending
 
 # The import function that was installed when the hook went in. Every
 # non-deferred call chains to it, so import wrappers installed before
@@ -34,21 +34,21 @@ from unwrapt._config import Settings, is_candidate, is_native_pending
 
 _original_import: Callable[..., types.ModuleType] | None = None
 
-# The settings the hook was installed with.
+# The configuration the hook was installed with.
 
-_settings: Settings | None = None
+_config: Config | None = None
 
 
-def install_shim(settings: Settings) -> bool:
+def install_shim(config: Config) -> bool:
     """Install the shim hook, or decline to.
 
     Below Python 3.15 the hook defers imports marked in the importing
-    module's own __lazy_modules__ and in the external configuration,
-    either source being enough, unless UNWRAPT_CONFIG_ONLY restricts
-    it to the configuration alone. From Python 3.15 the interpreter
-    already handles __lazy_modules__, so the hook runs in
-    external-config-only mode and defers only what the external
-    configuration names; with no configuration there is nothing for
+    module's own __lazy_modules__ and in the configuration's
+    lazy_modules, either source being enough, unless config_only
+    restricts it to lazy_modules alone. From Python 3.15 the
+    interpreter already handles __lazy_modules__, so the hook runs in
+    external-config-only mode and defers only what lazy_modules
+    names; with no entries there is nothing for
     unwrapt to do, so nothing is installed. That case is not a warning:
     running the bootstrap on 3.15 with no configuration is a normal,
     harmless setup.
@@ -57,30 +57,31 @@ def install_shim(settings: Settings) -> bool:
     was already installed or there was nothing to install.
     """
 
-    global _original_import, _settings
+    global _original_import, _config
 
     if is_installed():
         return False
 
-    if has_native_lazy_imports() and not settings.config:
-        if settings.debug:
+    if has_native_lazy_imports() and not config.lazy_modules:
+        if config.debug:
             print(
                 "unwrapt: nothing to do on Python 3.15 or later without"
-                " UNWRAPT_CONFIG: native lazy imports handle __lazy_modules__",
+                " lazy_modules entries: native lazy imports handle"
+                " __lazy_modules__",
                 file=sys.stderr,
             )
 
         return False
 
-    _settings = settings
+    _config = config
     _original_import = builtins.__import__
     builtins.__import__ = _lazy_aware_import
     mark_installed("shim")
 
-    if settings.debug:
+    if config.debug:
         if has_native_lazy_imports():
             mode = "external-config-only mode"
-        elif settings.config_only:
+        elif config.config_only:
             mode = "shim mode (external configuration only)"
         else:
             mode = "shim mode"
@@ -119,8 +120,8 @@ def _lazy_aware_import(
       to defer.
 
     - the import is a candidate: named in the importing module's
-      __lazy_modules__ or in the external configuration, per the
-      version rules of the configuration module.
+      __lazy_modules__ or in the configuration's lazy_modules, per
+      the version rules of the configuration module.
 
     One further rule applies on Python 3.15 and later, before the
     candidate check: a name with a pending native lazy binding is
@@ -139,7 +140,7 @@ def _lazy_aware_import(
     """
 
     if (
-        _settings is not None
+        _config is not None
         and level == 0
         and not fromlist
         and globals is not None
@@ -147,14 +148,14 @@ def _lazy_aware_import(
         and name not in sys.modules
     ):
         if has_native_lazy_imports() and is_native_pending(name):
-            if _settings.debug:
+            if _config.debug:
                 importer = globals.get("__name__", "<unknown>")
                 print(
                     f"unwrapt: leaving {name!r} in {importer} to native lazy imports",
                     file=sys.stderr,
                 )
-        elif is_candidate(name, globals, _settings):
-            if _settings.debug:
+        elif is_candidate(name, globals, _config):
+            if _config.debug:
                 importer = globals.get("__name__", "<unknown>")
                 print(f"unwrapt: deferring {name!r} in {importer}", file=sys.stderr)
 

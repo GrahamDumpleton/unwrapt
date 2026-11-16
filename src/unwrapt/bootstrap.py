@@ -14,12 +14,13 @@ startup, before the application's own imports. Absent either opt-in,
 the entry point in unwrapt's metadata is inert, and unwrapt itself
 never imports autowrapt and has no dependency on it.
 
-When it fires, bootstrap() hands over to unwrapt.install(), which
-resolves the mode from the environment and installs the hook, or
-declines to, per the Python version rules there.
+When it fires, bootstrap() hands over to unwrapt.install_from_env(),
+which reads the configuration file and the environment, resolves the
+mode, and installs the hook, or declines to, per the Python version
+rules there.
 """
 
-from unwrapt import install
+from unwrapt import install_from_env
 
 
 def bootstrap(module: object = None) -> bool:
@@ -34,4 +35,4 @@ def bootstrap(module: object = None) -> bool:
     Returns True when a hook was installed, False otherwise.
     """
 
-    return install()
+    return install_from_env()

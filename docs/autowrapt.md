@@ -34,7 +34,7 @@ os = "unwrapt.bootstrap:bootstrap"
 ```
 
 The callback is `unwrapt.bootstrap:bootstrap`, which calls
-`unwrapt.install()`; the entry point metadata is inert unless both
+`unwrapt.install_from_env()`; the entry point metadata is inert unless both
 autowrapt is installed and the variable is set.
 
 ## Ordering

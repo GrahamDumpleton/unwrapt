@@ -29,10 +29,15 @@ interleaving their reports: worker process setups (a mod_wsgi daemon
 process, for example) may not run exit handlers reliably, and one file
 per process is the robust route.
 
-All the variables are on the [configuration](configuration.md) page;
-the profile ones are `UNWRAPT_PROFILE`, `UNWRAPT_PROFILE_OUTPUT`,
+Where the report goes and what it shows can also be set in the
+`[profile]` table of the [configuration file](configuration.md), with
+a relative `output` resolved against the file's directory. The table
+never switches profiling on: `UNWRAPT_PROFILE` does that. All the
+settings are on the [configuration](configuration.md) page; the
+profile variables are `UNWRAPT_PROFILE`, `UNWRAPT_PROFILE_OUTPUT`,
 `UNWRAPT_PROFILE_FORMAT`, `UNWRAPT_PROFILE_MIN_MS` and
-`UNWRAPT_PROFILE_PACKAGES`.
+`UNWRAPT_PROFILE_PACKAGES`, and each of the last four overrides the
+file's value.
 
 ## What it does
 

@@ -17,11 +17,23 @@ def test_py_typed_ships_with_the_package() -> None:
 
 def test_public_api_surface() -> None:
     assert sorted(unwrapt.__all__) == [
+        "Config",
+        "ConfigError",
+        "ProfileOptions",
         "__version__",
         "__version_info__",
+        "find_config",
         "install",
+        "install_from_env",
         "is_installed",
+        "load_config",
     ]
+
+    # Every name in __all__ resolves, including the configuration API
+    # that loads through the module __getattr__.
+
+    for name in unwrapt.__all__:
+        assert getattr(unwrapt, name) is not None
 
     assert callable(unwrapt.install)
     assert callable(unwrapt.is_installed)

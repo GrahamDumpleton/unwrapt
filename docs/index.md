@@ -54,7 +54,7 @@ On Pythons below 3.15, activated through
   First use imports the real module and swaps it into the importing
   namespace, so after first use there is no residual overhead.
 
-- A [JSON configuration](external-config.md) defers imports in modules
+- A [configuration file](external-config.md) defers imports in modules
   whose source you do not control.
 
 On Python 3.15 and later the interpreter handles `__lazy_modules__`

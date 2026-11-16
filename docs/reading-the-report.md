@@ -73,10 +73,9 @@ Module-level imports the run loaded, ranked by cumulative time:
   `__lazy_modules__`, by the configuration, or natively on 3.15: no
   action needed.
 
-Rows under `UNWRAPT_PROFILE_MIN_MS` are hidden, and
-`UNWRAPT_PROFILE_PACKAGES` hides importers outside the named
-top-level packages; both are display filters, and the JSON keeps
-every edge.
+Rows under the `min_ms` profile option are hidden, and the
+`packages` option hides importers outside the named top-level
+packages; both are display filters, and the JSON keeps every edge.
 
 The footnotes:
 

@@ -44,3 +44,29 @@ the rest of the documentation, starting with
   `__lazy_modules__` gives lazy loading on every supported version
   with no change to the code: unwrapt emulates it from 3.11 to 3.14,
   and the interpreter handles it natively from 3.15.
+
+- **The configuration is a TOML file, found as wrapture finds its
+  own.** `unwrapt.toml` holds the whole configuration, and a
+  `pyproject.toml` holds it under `[tool.unwrapt]`: `config_only`,
+  `debug`, the `[lazy_modules]` deferrals, and a `[profile]` table
+  saying how a report is written. The file never switches deferral or
+  profiling on. It is found through `UNWRAPT_CONFIG`, then
+  `unwrapt.toml`, then `pyproject.toml`, the first source winning, and
+  a `.json` file named by `UNWRAPT_CONFIG` is still accepted as the
+  form holding only the deferrals. See
+  [configuration](configuration.md).
+
+- **A configuration file is checked strictly.** An unknown key or a
+  value of the wrong shape is an error rather than being skipped, so
+  through the bootstrap a JSON file with one bad entry now warns and
+  is left out whole, where before the bad entry alone was skipped.
+
+- **New API:** `unwrapt.find_config()`, `unwrapt.load_config()`,
+  `unwrapt.install_from_env()`, which is what the autowrapt bootstrap
+  now calls, and the `Config`, `ProfileOptions` and `ConfigError`
+  types. The `UNWRAPT_*` variables override the file's values. See the
+  [API](api.md).
+
+- The text report's filter notes now name the `min_ms` and `packages`
+  options rather than the environment variables, since either can set
+  them.
