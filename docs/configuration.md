@@ -25,6 +25,7 @@ output = "unwrapt-%p.txt"             # relative to the config file's directory
 format = "text"
 min_ms = 1.0
 packages = ["shop"]
+rows = 8
 ```
 
 `config_only` = true | false
@@ -70,13 +71,22 @@ asked for:
 
   - `format`: `"text"` (the default) or `"json"`.
 
-  - `min_ms`: hide text candidate rows whose cumulative time is below
-    this many milliseconds. The JSON keeps every edge; this is a
-    display filter.
+  - `min_ms`: hide text candidate rows and importers whose cumulative
+    time is below this many milliseconds, and heavy modules whose self
+    time is. The JSON keeps every edge; this is a display filter.
 
-  - `packages`: restrict the text report's candidate rows to importers
-    under these top-level packages, treating the rest as not editable.
-    An empty list is the same as leaving it out.
+  - `packages`: restrict the text report's candidate rows and
+    importers to importers under these top-level packages, treating
+    the rest as not editable, and its heavy modules to those loaded
+    through them. An empty list is the same as leaving it out.
+
+  - `rows`: how many heavy modules, each with its import chain, and
+    importers the text report lists. The default is 8, and 0 lists
+    every one.
+
+  The display filters are saved in the report, so a report re-rendered
+  with `python -m unwrapt.report` uses them too, unless its `--min-ms`,
+  `--packages` or `--rows` options say otherwise.
 
 The file never switches deferral or profiling on: the caller decides
 that. A `[profile]` table left in a `pyproject.toml` therefore never
@@ -206,6 +216,11 @@ in the path, keeps concurrent workers from interleaving their reports.
 `UNWRAPT_PROFILE_PACKAGES` = a,b
 
 : Override the `packages` profile option, as a comma separated list.
+
+`UNWRAPT_PROFILE_ROWS` = *n*
+
+: Override the `rows` profile option: how many heavy modules and
+importers the text report lists, 0 for all of them.
 
 The profile variables override nothing when they are empty.
 

@@ -10,7 +10,8 @@
     ],
     "filters": {
         "min_ms": 0.0,
-        "packages": null
+        "packages": null,
+        "rows": 8
     },
     "edges": [
         {

@@ -37,9 +37,9 @@ a relative `output` resolved against the file's directory. The table
 never switches profiling on: `UNWRAPT_PROFILE` does that. All the
 settings are on the [configuration](configuration.md) page; the
 profile variables are `UNWRAPT_PROFILE`, `UNWRAPT_PROFILE_OUTPUT`,
-`UNWRAPT_PROFILE_FORMAT`, `UNWRAPT_PROFILE_MIN_MS` and
-`UNWRAPT_PROFILE_PACKAGES`, and each of the last four overrides the
-file's value.
+`UNWRAPT_PROFILE_FORMAT`, `UNWRAPT_PROFILE_MIN_MS`,
+`UNWRAPT_PROFILE_PACKAGES` and `UNWRAPT_PROFILE_ROWS`, and each of the
+last five overrides the file's value.
 
 ## What it does
 
@@ -165,3 +165,15 @@ re-renders a saved JSON report as text, and with `--compare` diffs
 two of them: total import time, per-module self time changes, and
 modules newly loaded or no longer loaded. This is the verify and guard
 step of the strategy, without re-running the application.
+
+The text uses the display filters saved in the report, and three
+options override them: `--min-ms MS`, `--packages a,b` and `--rows N`,
+where `--rows 0` lists every heavy module and importer:
+
+```console
+$ python -m unwrapt.report before.json --rows 0
+$ python -m unwrapt.report before.json --min-ms 1 --packages shop --rows 20
+```
+
+They change the rendering only; the comparison always covers every
+module.

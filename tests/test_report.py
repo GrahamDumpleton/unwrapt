@@ -102,7 +102,7 @@ def test_to_dict_is_the_versioned_schema() -> None:
         "outcome": "fork",
     }
     assert data["label_sets"] == [{}]
-    assert data["filters"] == {"min_ms": 0.0, "packages": None}
+    assert data["filters"] == {"min_ms": 0.0, "packages": None, "rows": 8}
     assert set(data) == {
         "schema",
         "unwrapt",
@@ -150,6 +150,20 @@ def test_report_round_trips_through_json() -> None:
     assert restored.render_text() == report.render_text()
 
 
+def test_from_dict_reads_a_report_without_rows() -> None:
+    # A 1.0.0a3 report has no rows filter, and reads as the default.
+
+    data = json.loads(report_of(edge(0, "csv", "app")).render_json())
+    del data["filters"]["rows"]
+
+    assert Report.from_dict(data).filters["rows"] == 8
+
+    data["filters"]["rows"] = -1
+
+    with pytest.raises(ValueError, match="rows must be a non-negative"):
+        Report.from_dict(data)
+
+
 def test_from_dict_refuses_another_schema() -> None:
     data = dict(report_of().to_dict())
     data["schema"] = 1
@@ -162,10 +176,14 @@ def test_filters_stored_and_overridable() -> None:
     report = report_of(
         edge(0, "csv", "app", cum_ms=50.0, self_ms=50.0),
         edge(1, "wave", "app", cum_ms=0.1, self_ms=0.1),
-        options=ProfileOptions(min_ms=10.0, packages=("app",)),
+        options=ProfileOptions(min_ms=10.0, packages=("app",), rows=3),
     )
 
-    assert report.to_dict()["filters"] == {"min_ms": 10.0, "packages": ["app"]}
+    assert report.to_dict()["filters"] == {
+        "min_ms": 10.0,
+        "packages": ["app"],
+        "rows": 3,
+    }
 
     # The filters are applied in the render only, so a view can choose
     # its own: every edge is still in the data.
@@ -347,6 +365,125 @@ def test_heavy_modules_sum_self_time() -> None:
     ]
 
 
+def _heavy_section(text: str) -> list[str]:
+    section = text.split("Heavy modules: by self time\n")[1].split("\n\n")[0]
+
+    return section.splitlines()
+
+
+def _chain_modules(text: str) -> list[str]:
+    section = text.split("Import chains: why each heavy module is loaded\n")[1]
+    section = section.split("Limits of this report:")[0]
+
+    return [
+        line.split()[0]
+        for line in section.splitlines()
+        if line.startswith("  ") and not line.startswith("    ")
+    ]
+
+
+def test_heavy_modules_text_lists_the_eight_heaviest() -> None:
+    report = report_of(
+        *(
+            edge(index, f"mod{index}", "app", cum_ms=20.0 - index, self_ms=20.0 - index)
+            for index in range(10)
+        )
+    )
+
+    lines = _heavy_section(report.render_text())
+
+    assert [line.split()[-1] for line in lines[:-1]] == [
+        f"mod{index}" for index in range(8)
+    ]
+    assert lines[-1] == "  (2 more not shown)"
+
+    # Each listed module has its chain, and no other module does.
+
+    assert _chain_modules(report.render_text()) == [f"mod{index}" for index in range(8)]
+
+    # The analysis function still returns every module.
+
+    assert len(heavy_modules(report)) == 10
+
+    # rows changes how many are listed, each with its chain, and 0
+    # lists them all.
+
+    text = report.render_text(rows=3)
+
+    assert _heavy_section(text)[-1] == "  (7 more not shown)"
+    assert _chain_modules(text) == ["mod0", "mod1", "mod2"]
+
+    lines = _heavy_section(report.render_text(rows=0))
+
+    assert len(lines) == 10
+    assert "more not shown" not in "\n".join(lines)
+
+    with pytest.raises(ValueError, match="rows must be a non-negative"):
+        report.render_text(rows=-1)
+
+
+def test_rows_filter_is_stored_in_the_report() -> None:
+    report = report_of(
+        *(
+            edge(index, f"mod{index}", f"app.m{index}", cum_ms=20.0 - index)
+            for index in range(5)
+        ),
+        options=ProfileOptions(rows=2),
+    )
+
+    text = report.render_text()
+
+    assert _heavy_section(text)[-1] == "  (3 more not shown)"
+    assert _by_importer_section(text)[-1] == "  (3 more not shown)"
+    assert len(_heavy_section(report.render_text(rows=0))) == 5
+
+
+def test_heavy_modules_text_filters_on_self_time() -> None:
+    report = report_of(
+        edge(0, "numpy", "app", cum_ms=90.0, self_ms=80.0),
+        edge(1, "wrapper", "app", cum_ms=95.0, self_ms=0.5),
+    )
+
+    text = report.render_text(min_ms=1.0)
+    lines = _heavy_section(text)
+
+    assert lines == [
+        "(modules under 1.0 ms self time hidden by the min_ms filter)",
+        "  80.0 ms  numpy",
+        "  (1 more not shown)",
+    ]
+    assert _chain_modules(text) == ["numpy"]
+
+
+def test_heavy_modules_text_keeps_modules_loaded_through_packages() -> None:
+    report = report_of(
+        # The application's own package, imported by the entry point,
+        # and what it pulls in, directly and further down.
+        edge(0, "app", "__main__", cum_ms=60.0, self_ms=5.0),
+        edge(1, "numpy", "app", parent_id=0, cum_ms=55.0, self_ms=30.0),
+        edge(2, "_multiarray", "numpy", parent_id=1, cum_ms=25.0, self_ms=25.0),
+        # Imports the entry point makes itself, outside the package.
+        edge(3, "sqlite3", "__main__", cum_ms=40.0, self_ms=10.0),
+        edge(4, "_sqlite3", "sqlite3", parent_id=3, cum_ms=30.0, self_ms=30.0),
+    )
+
+    text = report.render_text(packages=["app"])
+    lines = _heavy_section(text)
+
+    assert lines == [
+        "(modules not loaded through app hidden by the packages filter)",
+        "  30.0 ms  numpy",
+        "  25.0 ms  _multiarray",
+        "  5.0 ms  app",
+        "  (2 more not shown)",
+    ]
+    assert _chain_modules(text) == ["numpy", "_multiarray", "app"]
+
+    # Without the filter every module is listed.
+
+    assert len(_heavy_section(report.render_text())) == 5
+
+
 def test_by_importer_sums_direct_loads_only() -> None:
     report = report_of(
         edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=5.0),
@@ -357,6 +494,49 @@ def test_by_importer_sums_direct_loads_only() -> None:
     entries = {entry["importer"]: entry["cum_ms"] for entry in by_importer(report)}
 
     assert entries == {"app": 120.0, "mypkg.web": 90.0}
+
+
+def _by_importer_section(text: str) -> list[str]:
+    section = text.split("the files to edit first\n")[1].split("\n\n")[0]
+
+    return section.splitlines()
+
+
+def test_by_importer_text_lists_the_eight_costliest() -> None:
+    report = report_of(
+        *(
+            edge(index, "csv", f"app.mod{index}", cum_ms=20.0 - index)
+            for index in range(10)
+        )
+    )
+
+    lines = _by_importer_section(report.render_text())
+
+    assert [line.split()[-1] for line in lines[:-1]] == [
+        f"app.mod{index}" for index in range(8)
+    ]
+    assert lines[-1] == "  (2 more not shown)"
+
+    # The analysis function still returns every importer.
+
+    assert len(by_importer(report)) == 10
+
+
+def test_by_importer_text_applies_the_filters() -> None:
+    report = report_of(
+        edge(0, "numpy", "app.analytics", cum_ms=90.0),
+        edge(1, "csv", "app.client", cum_ms=0.5),
+        edge(2, "markupsafe", "jinja2", cum_ms=40.0),
+    )
+
+    lines = _by_importer_section(report.render_text(min_ms=1.0, packages=["app"]))
+
+    assert lines == [
+        "(importers under 1.0 ms hidden by the min_ms filter)",
+        "(importers outside app hidden by the packages filter)",
+        "  90.0 ms  app.analytics",
+        "  (2 more not shown)",
+    ]
 
 
 def test_total_is_sum_of_outermost_edges() -> None:

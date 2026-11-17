@@ -343,7 +343,7 @@ def test_json_schema_shape(tmp_path: Path) -> None:
     assert "python" in report
     assert report["labels"] == {}
     assert report["label_sets"] == [{}]
-    assert report["filters"] == {"min_ms": 0.0, "packages": None}
+    assert report["filters"] == {"min_ms": 0.0, "packages": None, "rows": 8}
     assert isinstance(report["edges"], list)
 
     # Facts only: the analysis is computed from them, not stored.

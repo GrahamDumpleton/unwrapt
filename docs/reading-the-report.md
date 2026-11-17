@@ -126,6 +126,8 @@ Module-level imports the run loaded, ranked by cumulative time:
 Rows under the `min_ms` profile option are hidden, and the
 `packages` option hides importers outside the named top-level
 packages; both are display filters, and the JSON keeps every edge.
+They filter the [heavy modules](#heavy-modules) and the
+[importers](#by-importer) too.
 
 The footnotes:
 
@@ -143,6 +145,31 @@ By self time: what each module cost on its own, separating it from
 what it pulled in. This is the section that names the culprit; the
 chains then explain how it got there.
 
+```
+Heavy modules: by self time
+  11.6 ms  werkzeug
+  6.0 ms  jinja2
+  4.8 ms  flask
+  ...
+  (87 more not shown)
+```
+
+The section lists the eight heaviest top-level packages, and says how
+many it left out; the `rows` profile option, or `--rows` when
+re-rendering a saved report, changes the number, and 0 lists them all.
+`heavy_modules()` in `unwrapt.report` returns every one. The display
+filters apply here as well, and leave a note when they do:
+
+- `min_ms` hides modules whose self time is below it.
+
+- `packages` keeps the modules loaded through the named packages: a
+  module stays when an import that loaded it, or an import call it
+  happened inside, was made by a module under one of them, so the
+  third-party dependencies your code pulls in stay listed. The named
+  packages themselves always stay. What the rest of the process loads
+  on its own, such as the imports the entry point makes outside your
+  packages, is hidden.
+
 ## By importer
 
 The cumulative time of each importing module's direct module-level
@@ -150,10 +177,17 @@ loads. These are the files to edit first: the sum never counts the
 imports made by the modules a file goes on to load, so it is the cost
 sitting behind `import` statements in that one file.
 
+The section lists the eight costliest importers, as many as `rows`
+says, and says how many it left out; `by_importer()` in
+`unwrapt.report` returns every one. As
+with the candidates, `min_ms` hides importers whose direct loads add
+up to less than it, and `packages` hides importers outside the named
+packages, each with a note saying so.
+
 ## Import chains
 
-For each of the heaviest modules, the path of import calls that loaded
-it, outermost first:
+For each heavy module listed above, the path of import calls that
+loaded it, outermost first:
 
 ```
   numpy  388.0 ms self
@@ -200,8 +234,10 @@ At the top level:
   the imports ran, as `unwrapt.scope()` set them. Each edge's `labels`
   is an index into it, and index 0 is the empty set, outside any scope.
 
-- `filters`: the `min_ms` and `packages` display filters the text
-  rendering uses unless told otherwise. They never drop an edge.
+- `filters`: the `min_ms`, `packages` and `rows` display filters the
+  text rendering uses unless told otherwise. They never drop an edge.
+  A report from 1.0.0a3, which has no `rows`, reads as the default of
+  8.
 
 - `edges`: the import calls, in the order they started.
 

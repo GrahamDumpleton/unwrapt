@@ -38,6 +38,41 @@ the rest of the documentation, starting with
 
 - The first pre-release of the series is `1.0.0a1`.
 
+### Changes in 1.0.0a4
+
+- **The heavy modules section is short, and filtered.** The text
+  report listed every module loaded, down to 0.0 ms, about 100 lines
+  for a small Flask application, pushing the chains off the screen.
+  It now lists the eight heaviest, with a line saying how many more
+  there are, and the import chains below it are those of the modules
+  it lists. The display filters apply to it too: `min_ms` hides
+  modules under that much self time, and `packages` keeps the modules
+  loaded through the named packages, so the dependencies your own
+  code pulls in stay listed. `heavy_modules()` still returns every
+  module. See [reading the report](reading-the-report.md#heavy-modules).
+
+- **So is the by-importer section.** It listed every importer, about
+  100 lines for the same application, and ignored both filters, though
+  `packages` exists to hide importers you cannot edit. It now lists
+  the eight costliest, with a line saying how many more there are;
+  `min_ms` hides importers whose direct loads add up to less, and
+  `packages` hides importers outside the named packages, as in the
+  candidates table. `by_importer()` still returns every importer. See
+  [reading the report](reading-the-report.md#by-importer).
+
+- **The number of rows is a display filter too.** The `rows` profile
+  option, and `UNWRAPT_PROFILE_ROWS`, set how many heavy modules and
+  importers the text report lists, 8 by default and 0 for all of them.
+  Like `min_ms` and `packages` it is saved in the report's `filters`,
+  and a report from 1.0.0a3, which has none, reads as 8. See
+  [configuration](configuration.md).
+
+- **`python -m unwrapt.report` takes the display filters.**
+  `--min-ms`, `--packages` and `--rows` override the ones saved in the
+  report when re-rendering it, so a saved report can be read with
+  every heavy module listed (`--rows 0`) without profiling again. See
+  [comparing runs](profile-mode.md#comparing-runs).
+
 ### Changes in 1.0.0a3
 
 - **The profile report names relative imports by the modules they

@@ -93,8 +93,11 @@ report.render_json()
 A profile report. `to_dict()` is the JSON schema, described field by
 field on [reading the report](reading-the-report.md#the-json-form),
 with its `schema` version, and `render_json()` is the same as JSON.
-`render_text(*, min_ms=None, packages=None)` is the text report, with
-the display filters defaulting to the report's own. `labels` is a dict
+`render_text(*, min_ms=None, packages=None, rows=None)` is the text
+report, with the display filters, which apply to the candidates, the
+heavy modules and the importers, defaulting to the report's own;
+`rows` is how many heavy modules and importers are listed, 0 for all.
+`labels` is a dict
 of the caller's own, saying what the report is of. `edges`,
 `label_sets` and `filters` hold the rest of the data, `edge(id)` finds
 an edge and `label_set(index)` the labels an edge's index refers to.
@@ -255,13 +258,16 @@ unwrapt.ProfileOptions(
     format: Literal["text", "json"] = "text",
     min_ms: float = 0.0,
     packages: Sequence[str] | None = None,
+    rows: int = 8,
 )
 ```
 
 How a profile report is written, as a frozen dataclass: the `[profile]`
-table of the configuration file. `packages` is stored as a tuple, and
-an empty sequence as None. A relative `output` loaded from a file has
-already been resolved against the file's directory.
+table of the configuration file. `min_ms`, `packages` and `rows` are
+the text report's display filters, described on the
+[configuration](configuration.md) page. `packages` is stored as a
+tuple, and an empty sequence as None. A relative `output` loaded from
+a file has already been resolved against the file's directory.
 
 ## unwrapt.Installed
 
@@ -373,7 +379,9 @@ plain dicts and lists, ready to serialise.
   prints.
 
 The module also holds the TypedDicts these return, and the command
-line: `python -m unwrapt.report REPORT [--compare REPORT]`.
+line: `python -m unwrapt.report REPORT [--compare REPORT] [--min-ms MS]
+[--packages NAMES] [--rows N]`, described under
+[comparing runs](profile-mode.md#comparing-runs).
 
 ## What is deliberately not API
 

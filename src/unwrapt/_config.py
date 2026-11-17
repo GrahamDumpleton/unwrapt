@@ -48,6 +48,10 @@ class ConfigWarning(UserWarning):
 
 ProfileFormat = Literal["text", "json"]
 
+# How many heavy modules and importers the text report lists by default.
+
+DEFAULT_ROWS = 8
+
 
 @dataclass(frozen=True, kw_only=True)
 class ProfileOptions:
@@ -56,17 +60,22 @@ class ProfileOptions:
     output is the path the report is written to, with %p expanding to
     the process id, or None for stderr. A relative output read from a
     configuration file is resolved against the file's directory when
-    the file is loaded. format is "text" or "json". min_ms hides text
-    candidate rows whose cumulative time is below it, and packages,
-    when set, restricts the text candidate rows to importers under the
-    named top-level packages; both are display filters only. An empty
-    packages sequence is the same as None.
+    the file is loaded. format is "text" or "json". The rest are
+    display filters for the text report, and never drop an edge from
+    the data. min_ms hides candidate rows and importers whose
+    cumulative time is below it, and heavy modules whose self time is.
+    packages, when set, restricts the candidate rows and importers to
+    importers under the named top-level packages, and the heavy modules
+    to those loaded through them; an empty sequence is the same as
+    None. rows is how many heavy modules, each with its import chain,
+    and importers are listed, 0 for all of them.
     """
 
     output: str | None = None
     format: ProfileFormat = "text"
     min_ms: float = 0.0
     packages: Sequence[str] | None = None
+    rows: int = DEFAULT_ROWS
 
     def __post_init__(self) -> None:
         """Validate the values and normalise packages to a tuple."""
@@ -102,6 +111,14 @@ class ProfileOptions:
                 raise ConfigError("profile packages must be a list of package names")
 
             object.__setattr__(self, "packages", tuple(packages) or None)
+
+        rows: object = self.rows
+
+        if isinstance(rows, bool) or not isinstance(rows, int):
+            raise ConfigError(f"profile rows must be a whole number, not {rows!r}")
+
+        if rows < 0:
+            raise ConfigError(f"profile rows must not be negative, not {rows!r}")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -164,7 +181,7 @@ class Config:
 
 
 _TOP_LEVEL_KEYS = frozenset({"config_only", "debug", "lazy_modules", "profile"})
-_PROFILE_KEYS = frozenset({"output", "format", "min_ms", "packages"})
+_PROFILE_KEYS = frozenset({"output", "format", "min_ms", "packages", "rows"})
 
 _TRUE_FLAGS = frozenset({"1", "true", "yes", "on"})
 _FALSE_FLAGS = frozenset({"", "0", "false", "no", "off"})
@@ -473,6 +490,7 @@ def _config_from(document: dict[str, Any], location: str, table: str) -> Config:
             format=profile_table.get("format", "text"),
             min_ms=profile_table.get("min_ms", 0.0),
             packages=profile_table.get("packages"),
+            rows=profile_table.get("rows", DEFAULT_ROWS),
         )
 
         return Config(
@@ -565,6 +583,22 @@ def _profile_overrides() -> dict[str, Any]:
 
         if packages:
             overrides["packages"] = packages
+
+    value = os.environ.get("UNWRAPT_PROFILE_ROWS")
+
+    if value:
+        try:
+            rows: int | None = int(value)
+        except ValueError:
+            rows = None
+
+        if rows is None or rows < 0:
+            _warn(
+                f"UNWRAPT_PROFILE_ROWS={value!r} is not a non-negative"
+                " whole number: ignoring it"
+            )
+        else:
+            overrides["rows"] = rows
 
     return overrides
 

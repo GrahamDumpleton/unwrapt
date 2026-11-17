@@ -40,6 +40,7 @@ _VARIABLES = (
     "UNWRAPT_PROFILE_FORMAT",
     "UNWRAPT_PROFILE_MIN_MS",
     "UNWRAPT_PROFILE_PACKAGES",
+    "UNWRAPT_PROFILE_ROWS",
 )
 
 
@@ -182,6 +183,7 @@ def test_load_config_defaults_when_nothing_found(clean: Path) -> None:
     assert config.profile.format == "text"
     assert config.profile.min_ms == 0.0
     assert config.profile.packages is None
+    assert config.profile.rows == 8
 
 
 def test_load_config_unwrapt_toml(clean: Path) -> None:
@@ -199,6 +201,7 @@ def test_load_config_unwrapt_toml(clean: Path) -> None:
         format = "json"
         min_ms = 1
         packages = ["shop"]
+        rows = 20
         """,
     )
 
@@ -217,6 +220,7 @@ def test_load_config_unwrapt_toml(clean: Path) -> None:
     assert config.profile.format == "json"
     assert config.profile.min_ms == 1.0
     assert config.profile.packages == ("shop",)
+    assert config.profile.rows == 20
 
 
 def test_load_config_pyproject_table(clean: Path) -> None:
@@ -339,6 +343,9 @@ def test_load_config_pyproject_without_table_raises(tmp_path: Path) -> None:
         ("[profile]\nmin_ms = -1\n", "min_ms must not be negative"),
         ("[profile]\noutput = 5\n", "output must be a path string"),
         ("[profile]\npackages = 'shop'\n", "packages must be a list"),
+        ("[profile]\nrows = 2.5\n", "rows must be a whole number"),
+        ("[profile]\nrows = true\n", "rows must be a whole number"),
+        ("[profile]\nrows = -1\n", "rows must not be negative"),
     ],
 )
 def test_load_config_invalid_values_raise(
@@ -390,6 +397,7 @@ def test_env_overrides_file(clean: Path, monkeypatch: pytest.MonkeyPatch) -> Non
         format = "text"
         min_ms = 1.0
         packages = ["shop"]
+        rows = 20
         """,
     )
 
@@ -399,6 +407,7 @@ def test_env_overrides_file(clean: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     monkeypatch.setenv("UNWRAPT_PROFILE_FORMAT", "JSON")
     monkeypatch.setenv("UNWRAPT_PROFILE_MIN_MS", "2.5")
     monkeypatch.setenv("UNWRAPT_PROFILE_PACKAGES", " mypkg , other ")
+    monkeypatch.setenv("UNWRAPT_PROFILE_ROWS", "0")
 
     config = config_from_env()
 
@@ -409,6 +418,7 @@ def test_env_overrides_file(clean: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert config.profile.format == "json"
     assert config.profile.min_ms == 2.5
     assert config.profile.packages == ("mypkg", "other")
+    assert config.profile.rows == 0
 
 
 def test_env_unset_or_empty_keeps_file_values(
@@ -450,6 +460,8 @@ def test_env_flags_accept_truthy_and_falsy_values(
         ("UNWRAPT_PROFILE_FORMAT", "xml"),
         ("UNWRAPT_PROFILE_MIN_MS", "soon"),
         ("UNWRAPT_PROFILE_MIN_MS", "-1"),
+        ("UNWRAPT_PROFILE_ROWS", "lots"),
+        ("UNWRAPT_PROFILE_ROWS", "-1"),
     ],
 )
 def test_env_invalid_value_warns_and_keeps_file_value(
@@ -457,7 +469,7 @@ def test_env_invalid_value_warns_and_keeps_file_value(
 ) -> None:
     _write(
         clean / "unwrapt.toml",
-        "debug = true\n[profile]\nformat = 'json'\nmin_ms = 3.0\n",
+        "debug = true\n[profile]\nformat = 'json'\nmin_ms = 3.0\nrows = 5\n",
     )
 
     monkeypatch.setenv(name, value)
@@ -469,6 +481,7 @@ def test_env_invalid_value_warns_and_keeps_file_value(
     assert config.debug is True
     assert config.profile.format == "json"
     assert config.profile.min_ms == 3.0
+    assert config.profile.rows == 5
 
     assert any(name in message for message in _config_warnings(caught))
 

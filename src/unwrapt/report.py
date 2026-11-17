@@ -8,7 +8,9 @@ chains(), heavy_modules(), by_importer(), deferred_used() and
 deferred_unused(), and compare_reports() for two reports.
 
 Run as `python -m unwrapt.report REPORT [--compare REPORT]` to
-re-render a saved JSON profile report as text, or to diff two of them.
+re-render a saved JSON profile report as text, or to diff two of them,
+with `--min-ms`, `--packages` and `--rows` overriding the display
+filters saved in the report.
 See the unwrapt documentation for what the report contains.
 """
 

@@ -34,14 +34,14 @@ from dataclasses import dataclass
 from typing import Any, Literal, TypedDict
 
 from unwrapt import __version__
-from unwrapt._config import ProfileOptions
+from unwrapt._config import DEFAULT_ROWS, ProfileOptions
 
 # The version of the dictionary form. Bumped whenever a field changes
 # incompatibly.
 
 SCHEMA = 3
 
-# How many heavy modules get an import chain in the text report.
+# How many heavy modules chains() and the summary's best cut look at.
 _CHAIN_LIMIT = 8
 
 # `import a.b as c` cannot be deferred by the shim on older Pythons:
@@ -106,6 +106,7 @@ class Filters(TypedDict):
 
     min_ms: float
     packages: list[str] | None
+    rows: int
 
 
 class ReportDict(TypedDict):
@@ -329,6 +330,7 @@ class Report:
             filters=Filters(
                 min_ms=float(data["filters"]["min_ms"]),
                 packages=data["filters"]["packages"],
+                rows=_rows(data["filters"].get("rows", DEFAULT_ROWS)),
             ),
             labels=dict(data["labels"]),
             unwrapt=str(data["unwrapt"]),
@@ -349,6 +351,7 @@ class Report:
                 packages=list(self.filters["packages"])
                 if self.filters["packages"] is not None
                 else None,
+                rows=self.filters["rows"],
             ),
             edges=list(self.edges),
         )
@@ -363,16 +366,19 @@ class Report:
         *,
         min_ms: float | None = None,
         packages: Sequence[str] | None = None,
+        rows: int | None = None,
     ) -> str:
         """The text report.
 
         A summary header, the deferral sections for a run with deferral
         on, then candidates, heavy modules, by importer and import
-        chains. min_ms and packages filter the candidate rows, and
-        default to the report's own filters.
+        chains. min_ms and packages filter the candidate rows, the heavy
+        modules and the importers. rows is how many heavy modules, each
+        with its chain, and importers are listed, 0 for all of them. All
+        three default to the report's own filters.
         """
 
-        return _render_text(self, min_ms, packages)
+        return _render_text(self, min_ms, packages, rows)
 
     def edge(self, edge_id: int | None) -> EdgeRecord | None:
         """The edge record with the given id, when the report has one."""
@@ -489,6 +495,7 @@ def build_report(
         filters=Filters(
             min_ms=options.min_ms,
             packages=list(options.packages) if options.packages is not None else None,
+            rows=options.rows,
         ),
     )
 
@@ -852,7 +859,8 @@ def main(argv: Sequence[str] | None = None) -> int:
     two reports: total import time, per-module self time changes, and
     modules newly loaded or no longer loaded. This supports the verify
     and guard steps of the strategy guide without re-running the
-    application.
+    application. --min-ms, --packages and --rows override the display
+    filters saved in the report, for the text rendering only.
     """
 
     parser = argparse.ArgumentParser(
@@ -865,6 +873,24 @@ def main(argv: Sequence[str] | None = None) -> int:
         metavar="REPORT",
         help="a second JSON report to compare against the first",
     )
+    parser.add_argument(
+        "--min-ms",
+        type=_non_negative_float,
+        metavar="MS",
+        help="hide rows under this many milliseconds",
+    )
+    parser.add_argument(
+        "--packages",
+        type=_package_list,
+        metavar="NAMES",
+        help="comma separated top-level packages to keep importers under",
+    )
+    parser.add_argument(
+        "--rows",
+        type=_non_negative_int,
+        metavar="N",
+        help="how many heavy modules and importers to list, 0 for all",
+    )
 
     args = parser.parse_args(argv)
 
@@ -876,13 +902,56 @@ def main(argv: Sequence[str] | None = None) -> int:
 
         return 1
 
-    print(before.render_text())
+    print(
+        before.render_text(min_ms=args.min_ms, packages=args.packages, rows=args.rows)
+    )
 
     if after is not None:
         print("")
         print(compare_reports(before, after))
 
     return 0
+
+
+def _non_negative_float(value: str) -> float:
+    """An argparse type: a number that is not negative."""
+
+    try:
+        number = float(value)
+    except ValueError:
+        number = -1.0
+
+    if not number >= 0.0:
+        raise argparse.ArgumentTypeError(f"{value!r} is not a non-negative number")
+
+    return number
+
+
+def _non_negative_int(value: str) -> int:
+    """An argparse type: a whole number that is not negative."""
+
+    try:
+        number = int(value)
+    except ValueError:
+        number = -1
+
+    if number < 0:
+        raise argparse.ArgumentTypeError(
+            f"{value!r} is not a non-negative whole number"
+        )
+
+    return number
+
+
+def _package_list(value: str) -> list[str]:
+    """An argparse type: comma separated package names, at least one."""
+
+    names = [name.strip() for name in value.split(",") if name.strip()]
+
+    if not names:
+        raise argparse.ArgumentTypeError("no package names given")
+
+    return names
 
 
 # Classification of the recorded edges.
@@ -1255,6 +1324,115 @@ def _under_packages(importer: str | None, packages: Sequence[str] | None) -> boo
     )
 
 
+def _loaded_through(report: Report, packages: Sequence[str]) -> set[str]:
+    """The top-level packages loaded through the named packages.
+
+    A module counts when an import that loaded it, or any import call
+    it happened inside, was made by a module under the named packages:
+    the code there is why it is loaded. The named packages themselves
+    always count, whoever imported them.
+    """
+
+    graph = report.graph()
+    through: dict[int, bool] = {}
+    modules = {top_level(package) for package in packages}
+
+    for edge in report.edges:
+        if not edge["loaded"] or top_level(edge["imported"]) in modules:
+            continue
+
+        # Walk up the enclosing calls until one is settled, or made by
+        # a module under the packages, or there are no more, then
+        # settle every call on the way.
+
+        path: list[int] = []
+        current: int | None = edge["id"]
+        result = False
+
+        while current is not None:
+            if current in through:
+                result = through[current]
+                break
+
+            link = graph.by_id.get(current)
+
+            if link is None:
+                break
+
+            path.append(current)
+
+            if _under_packages(link["importer"], packages):
+                result = True
+                break
+
+            current = link["parent_id"]
+
+        for edge_id in path:
+            through[edge_id] = result
+
+        if result:
+            modules.add(top_level(edge["imported"]))
+
+    return modules
+
+
+def _rows(value: object) -> int:
+    """A rows filter, checked: a whole number, not negative.
+
+    Raises ValueError otherwise, as for any other malformed report.
+    """
+
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"rows must be a non-negative whole number, not {value!r}")
+
+    return value
+
+
+def _heavy_shown(
+    report: Report, min_ms: float, packages: Sequence[str] | None, rows: int
+) -> tuple[list[HeavyModule], int]:
+    """The heavy modules the text report lists, and how many it leaves
+    out: those under min_ms of self time, those not loaded through the
+    packages filter's packages, and any beyond the rows heaviest, when
+    rows is not 0."""
+
+    heavy = heavy_modules(report)
+
+    through = _loaded_through(report, packages) if packages is not None else None
+
+    kept = [
+        entry
+        for entry in heavy
+        if entry["self_ms"] >= min_ms
+        and (through is None or entry["module"] in through)
+    ]
+
+    shown = kept[:rows] if rows else kept
+
+    return shown, len(heavy) - len(shown)
+
+
+def _importers_shown(
+    report: Report, min_ms: float, packages: Sequence[str] | None, rows: int
+) -> tuple[list[ByImporter], int]:
+    """The importers the text report lists, and how many it leaves out:
+    those whose direct loads add up to under min_ms, those outside the
+    packages filter's packages, and any beyond the rows costliest, when
+    rows is not 0."""
+
+    entries = by_importer(report)
+
+    kept = [
+        entry
+        for entry in entries
+        if entry["cum_ms"] >= min_ms and _under_packages(entry["importer"], packages)
+    ]
+
+    shown = kept[:rows] if rows else kept
+
+    return shown, len(entries) - len(shown)
+
+
 def _loaded_modules(report: Report) -> set[str]:
     """The top-level packages a report's loaded edges brought in."""
 
@@ -1292,6 +1470,7 @@ def _render_text(
     report: Report,
     min_ms: float | None,
     packages: Sequence[str] | None,
+    rows: int | None,
 ) -> str:
     """Render the text report, from the analysis functions alone."""
 
@@ -1300,6 +1479,8 @@ def _render_text(
 
     if packages is None and report.filters["packages"] is not None:
         packages = report.filters["packages"]
+
+    rows = _rows(report.filters["rows"] if rows is None else rows)
 
     headline = summary(report)
     lines: list[str] = []
@@ -1404,28 +1585,66 @@ def _render_text(
     lines.append("  (2) function level imports are already deferred until the")
     lines.append("      function runs, so there is nothing to decide.")
 
-    # Heavy modules.
+    # Heavy modules: the heaviest few, filtered as the candidates are,
+    # with how many were left out. The chains below are theirs.
 
     lines.append("")
     lines.append("Heavy modules: by self time")
 
-    for heavy in heavy_modules(report):
+    if min_ms > 0.0:
+        lines.append(
+            f"(modules under {_ms(min_ms)} ms self time hidden by the min_ms filter)"
+        )
+
+    if packages is not None:
+        names = ", ".join(packages)
+        lines.append(
+            f"(modules not loaded through {names} hidden by the packages filter)"
+        )
+
+    shown, left_out = _heavy_shown(report, min_ms, packages, rows)
+
+    for heavy in shown:
         lines.append(f"  {_ms(heavy['self_ms'])} ms  {heavy['module']}")
+
+    if not shown and not left_out:
+        lines.append("  (nothing to show)")
+    elif left_out:
+        lines.append(f"  ({left_out} more not shown)")
 
     # By importer.
 
     lines.append("")
     lines.append("By importer: direct module-level loads, the files to edit first")
 
-    for entry in by_importer(report):
+    if min_ms > 0.0:
+        lines.append(f"(importers under {_ms(min_ms)} ms hidden by the min_ms filter)")
+
+    if packages is not None:
+        names = ", ".join(packages)
+        lines.append(f"(importers outside {names} hidden by the packages filter)")
+
+    importers, importers_left_out = _importers_shown(report, min_ms, packages, rows)
+
+    for entry in importers:
         lines.append(f"  {_ms(entry['cum_ms'])} ms  {entry['importer']}")
+
+    if not importers and not importers_left_out:
+        lines.append("  (nothing to show)")
+    elif importers_left_out:
+        lines.append(f"  ({importers_left_out} more not shown)")
 
     # Import chains.
 
     lines.append("")
     lines.append("Import chains: why each heavy module is loaded")
 
-    for item in chains(report):
+    for heavy in shown:
+        item = chain(report, heavy["module"])
+
+        if item is None:
+            continue
+
         lines.append("")
         lines.append(f"  {item['module']}  {_ms(item['self_ms'])} ms self")
 

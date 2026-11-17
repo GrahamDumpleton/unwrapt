@@ -62,6 +62,51 @@ def test_main_compares_reports(
     assert "No longer loaded: csv" in out
 
 
+def test_main_filter_options_override_the_report(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    modules = [f"mod{index}" for index in range(10)]
+    report = _write_report(tmp_path / "report.json", 100.0, modules)
+
+    assert main([report]) == 0
+    assert "(2 more not shown)" in capsys.readouterr().out
+
+    assert main([report, "--rows", "3"]) == 0
+    assert "(7 more not shown)" in capsys.readouterr().out
+
+    assert main([report, "--rows", "0"]) == 0
+    assert "more not shown" not in capsys.readouterr().out
+
+    assert main([report, "--min-ms", "20", "--packages", "app,other"]) == 0
+
+    out = capsys.readouterr().out
+
+    assert "(rows under 20.0 ms hidden by the min_ms filter)" in out
+    assert "(rows outside app, other hidden by the packages filter)" in out
+
+
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        ["--rows", "-1"],
+        ["--rows", "lots"],
+        ["--min-ms", "-1"],
+        ["--min-ms", "soon"],
+        ["--packages", " , "],
+    ],
+)
+def test_main_invalid_filter_option_fails(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], arguments: list[str]
+) -> None:
+    report = _write_report(tmp_path / "report.json", 100.0, ["csv"])
+
+    with pytest.raises(SystemExit) as info:
+        main([report, *arguments])
+
+    assert info.value.code == 2
+    assert "python -m unwrapt.report" in capsys.readouterr().err
+
+
 def test_main_missing_file_fails(
     tmp_path: Path, capsys: pytest.CaptureFixture[str]
 ) -> None:
