@@ -649,3 +649,19 @@ def test_is_native_pending(monkeypatch: pytest.MonkeyPatch) -> None:
         assert is_native_pending("wave") is False
     finally:
         monkeypatch.delattr(sys, "lazy_modules", raising=False)
+
+
+def test_is_native_pending_from_import(monkeypatch: pytest.MonkeyPatch) -> None:
+    # `lazy from pkg import sub`, with pkg already loaded, registers only
+    # pkg.sub, and native reifies it with the call ("pkg", ("sub",)).
+
+    monkeypatch.setattr(sys, "lazy_modules", {"pkg.sub"}, raising=False)
+
+    try:
+        assert is_native_pending("pkg", ("sub",)) is True
+        assert is_native_pending("pkg", ("other", "sub")) is True
+        assert is_native_pending("pkg", ("other",)) is False
+        assert is_native_pending("pkg", None) is False
+        assert is_native_pending("pkg") is False
+    finally:
+        monkeypatch.delattr(sys, "lazy_modules", raising=False)

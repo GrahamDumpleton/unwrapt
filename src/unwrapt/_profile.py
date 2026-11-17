@@ -495,13 +495,18 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
                 recorder.next_id += 1
 
             # A native lazy import (Python 3.15) only reaches the hook
-            # when native reifies it, at first use; the pending binding
-            # in sys.lazy_modules identifies it, and it counts as
-            # already lazy in the report. The check must happen before
-            # the real import runs: native removes the pending entry
-            # once the module is loaded.
+            # when native reifies it, at first use, always by its
+            # absolute name; the pending binding in sys.lazy_modules
+            # identifies it, for a from-import by the names in its
+            # fromlist, and it counts as already lazy in the report.
+            # The check must happen before the real import runs: native
+            # removes the pending entry once the module is loaded.
 
-            native_lazy = has_native_lazy_imports() and is_native_pending(name)
+            native_lazy = (
+                level == 0
+                and has_native_lazy_imports()
+                and is_native_pending(name, fromlist)
+            )
 
             stack.append((edge_id, child_time))
 

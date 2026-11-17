@@ -51,10 +51,10 @@ found.
 
 - From Python 3.15 the configuration is the only source, always: the
   interpreter handles `__lazy_modules__` itself and unwrapt never
-  reads it. Having entries is what activates unwrapt there. See
-  [Python 3.15](python-3-15.md), including the one rule about not
-  duplicating names the code already imports with an explicit
-  `lazy import` statement.
+  reads it. Having entries is what activates unwrapt there. An entry
+  that duplicates an import the code already declares lazy, by
+  `__lazy_modules__` or an explicit `lazy import` statement, is left to
+  the interpreter. See [Python 3.15](python-3-15.md).
 
 ## Errors
 

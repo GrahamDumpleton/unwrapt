@@ -78,7 +78,9 @@ first so the pass-through path stays fast:
 
 On Python 3.15 and later one further rule comes first: a name with a
 pending native lazy binding is native's business and passes through.
-See [Python 3.15](python-3-15.md) for why.
+See [Python 3.15](python-3-15.md) for why, and
+[the lazy import registry](python-3-15.md#the-lazy-import-registry)
+for how a pending binding is recognised.
 
 Everything else chains unchanged to the import function the hook
 replaced.

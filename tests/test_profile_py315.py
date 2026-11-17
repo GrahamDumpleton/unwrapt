@@ -11,7 +11,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from support import run_python
+from support import run_python, write_module
 
 from unwrapt.report import Report
 
@@ -66,6 +66,47 @@ def test_native_lazy_import_recorded_at_first_use(tmp_path: Path) -> None:
 
     assert "native lazy imports on Python 3.15" in text
     assert "recorded at first use" in text
+
+
+def test_native_lazy_from_imports_recorded_at_first_use(tmp_path: Path) -> None:
+    write_module(tmp_path, "nlpkg.__init__", "lazy from . import rel_sub\n")
+    write_module(tmp_path, "nlpkg.rel_sub", "X = 1\n")
+    write_module(tmp_path, "nlpkg.other", "Y = 2\n")
+
+    # Neither statement registers the package, which is loaded by the
+    # time each runs: only nlpkg.rel_sub and nlpkg.other are pending.
+
+    report = _report(
+        tmp_path,
+        """
+        import unwrapt
+
+        unwrapt.install_from_env()
+
+        import nlpkg
+
+        lazy from nlpkg import other
+
+        values = (nlpkg.rel_sub.X, other.Y)
+        """,
+    )
+
+    reified = {
+        tuple(edge["submodules"]): edge
+        for edge in report["edges"]
+        if edge["imported"] == "nlpkg" and edge["kind"] == "from"
+    }
+
+    for submodules in (("nlpkg.rel_sub",), ("nlpkg.other",)):
+        edge = reified[submodules]
+
+        assert edge["native_lazy"] is True
+        assert edge["already_lazy"] is True
+        assert edge["loaded"] is True
+
+    text = Report.from_dict(report).render_text()
+
+    assert "2 native lazy imports on Python 3.15" in text
 
 
 def test_untouched_native_lazy_import_never_appears(tmp_path: Path) -> None:

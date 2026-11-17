@@ -67,6 +67,23 @@ the rest of the documentation, starting with
   relative import reached: profile again. See
   [reading the report](reading-the-report.md#the-json-form).
 
+- **On Python 3.15, native lazy `from` imports are recognised in the
+  profile.** A `lazy from x import n` whose module `x` was already
+  loaded when the statement ran, which every relative `lazy from .
+  import n` is, was recorded at first use as an eager import, not
+  flagged `native_lazy` or already lazy, and left out of the
+  first-use warning. Such a statement registers `x.n` in
+  `sys.lazy_modules` rather than `x`, and the recorder now looks for
+  those entries. See
+  [the lazy import registry](python-3-15.md#the-lazy-import-registry).
+
+- **A configuration entry may duplicate an explicit `lazy import` on
+  Python 3.15.** The documentation said such an entry could not be
+  detected and must not be written, a fact true only of early 3.15
+  pre-releases: on 3.15.0 the statement registers its binding, and
+  the entry is left to native, as one duplicating a
+  `__lazy_modules__` name always was.
+
 ### Changes in 1.0.0a2
 
 - **Python 3.11 is supported.** The shim, the external configuration

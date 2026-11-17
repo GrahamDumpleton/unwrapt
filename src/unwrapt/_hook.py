@@ -286,9 +286,9 @@ def _make_hook(shim: Shim) -> ImportFunction:
         use, and deferring that call would hand native a lazy proxy
         where it expects the real module, so the hook recognises the
         reification by the pending binding in sys.lazy_modules and
-        chains through. An explicit `lazy import` statement leaves no
-        registry entry, so a config entry that duplicates one is not
-        detectable; the documentation says not to write those.
+        chains through. An explicit `lazy import` statement registers
+        its binding there too, so a config entry that duplicates one is
+        left to native in the same way.
 
         Everything else chains unchanged to the import function the
         hook replaced, so an import never behaves differently merely

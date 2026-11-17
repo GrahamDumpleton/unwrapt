@@ -32,12 +32,11 @@ and leaves everything else to the interpreter:
   `sys.lazy_modules` and passes it straight through: native expects
   the real module back, and deferring it again would hand it a proxy.
 
-- An explicit `lazy import x` statement is likewise native's. A
-  configuration entry that duplicates one cannot be detected (the
-  statement leaves no registry entry), so do not write those: the
-  entry would interfere with native's reification. Entries duplicating
-  a `__lazy_modules__` name are handled automatically, and
-  `UNWRAPT_DEBUG=1` reports the overlap.
+- An explicit `lazy import x` statement is likewise native's, and is
+  recognised the same way: the statement registers its binding in
+  `sys.lazy_modules` too. So a configuration entry that duplicates
+  either an explicit `lazy import` or a `__lazy_modules__` name is left
+  to native, and `UNWRAPT_DEBUG=1` reports the overlap.
 
 - With no configuration, unwrapt installs nothing: no hook, no
   overhead, no warning. Running the bootstrap on 3.15 with no
@@ -90,6 +89,26 @@ the ones that survive the [strategy guide](choosing-what-to-defer.md)
 triage become `__lazy_modules__` lines or `lazy import` statements in
 the source.
 
+## The lazy import registry
+
+`sys.lazy_modules` is the interpreter's set of lazy imports declared
+but not yet loaded, and it is what both unwrapt layers read to
+recognise native reifying an import. What it holds, verified on 3.15.0
+and 3.15.1, default and free-threaded builds alike:
+
+| Statement | Registered when the statement runs | The `__import__` call at first use |
+| --- | --- | --- |
+| `lazy import x`, or `import x` with `x` in `__lazy_modules__` | `x` | `("x", fromlist=None)` |
+| `lazy from x import n` | `x.n` for each name, attributes included, and `x` only if it was not yet loaded | `("x", fromlist=("n",))` |
+| `lazy from . import n` in package `p` | `p.n` (the package is always loaded by then) | `("p", fromlist=("n",))` |
+
+A relative import is always reified with its absolute name and level
+0, and each entry is removed once its import has been loaded. So a
+call is a reification when its name is pending, or, for a from-import,
+when any `name.n` for the names in its fromlist is. Early 3.15
+pre-releases registered less (before 3.15.0a8 an explicit `lazy import`
+left no entry at all), and are not what these facts describe.
+
 ## Profile mode on 3.15
 
 The profiler does not neutralise native laziness, because the
@@ -102,8 +121,10 @@ Instead:
   (`sys.get_lazy_imports()` not `normal`) is warned about at install,
   because every import it touches is then measured at first use.
 
-- A native lazy import that is touched during the run is recorded
-  when native reifies it, at first use, flagged `native_lazy` in the
+- A native lazy import that is touched during the run, `lazy from`
+  forms included, is recorded when native reifies it, at first use,
+  recognised by its [registry entry](#the-lazy-import-registry),
+  flagged `native_lazy` in the
   [JSON report](reading-the-report.md), marked already lazy, and
   explained by a warning block in the text report: the cost is real
   and attributed to the importing module, but the line is the site of

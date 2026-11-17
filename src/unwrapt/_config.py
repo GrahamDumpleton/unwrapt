@@ -305,19 +305,27 @@ def env_flag(name: str) -> bool | None:
     return None
 
 
-def is_native_pending(name: str) -> bool:
-    """Whether a native lazy binding for name is still pending.
+def is_native_pending(name: str, fromlist: Sequence[str] | None = ()) -> bool:
+    """Whether a native lazy binding for the import of name is pending.
 
     Only meaningful on Python 3.15 and later, where sys.lazy_modules is
     the interpreter's registry of declared-but-not-yet-resolved lazy
-    imports: a name is in it from the moment its statement is deferred
-    until first use. unwrapt never adds to or removes from the registry;
-    it reads it for one purpose. On 3.15 a name declared in a module's
-    __lazy_modules__ reaches the hook only when native reifies it, at
-    first use, and by then it is in this registry, so the registry is
-    how the hook recognises a native reification call (which it must
-    pass through: native expects the real module back) without ever
-    reading the importer's own __lazy_modules__.
+    imports: an entry is in it from the moment its statement is
+    deferred until first use. unwrapt never adds to or removes from the
+    registry; it reads it for one purpose. On 3.15 an import declared
+    lazy, by a `lazy` statement or a module's __lazy_modules__, reaches
+    the hook only when native reifies it, at first use, and by then it
+    is in this registry, so the registry is how the hook recognises a
+    native reification call (which it must pass through: native expects
+    the real module back) without ever reading the importer's own
+    __lazy_modules__.
+
+    A whole-module import registers its name. A from-import, `lazy from
+    x import n`, registers x.n for each name it imports, attributes
+    included, and x itself only when x was not yet loaded, so
+    `lazy from . import n` never registers the package. Native reifies
+    it with the call `__import__("x", fromlist=("n",))`, so with a
+    fromlist the call is pending when name is, or any name.n is.
 
     Below 3.15 the attribute does not exist and this is always False.
     """
@@ -327,7 +335,15 @@ def is_native_pending(name: str) -> bool:
     if not isinstance(pending, (set, frozenset)):
         return False
 
-    return name in pending
+    if name in pending:
+        return True
+
+    if not fromlist:
+        return False
+
+    return any(
+        isinstance(item, str) and f"{name}.{item}" in pending for item in fromlist
+    )
 
 
 def is_candidate(name: str, globals: Mapping[str, object], config: Config) -> bool:
