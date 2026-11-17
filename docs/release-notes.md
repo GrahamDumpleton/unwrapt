@@ -17,9 +17,10 @@ the rest of the documentation, starting with
   Activated with [autowrapt](autowrapt.md) or `unwrapt.install()`,
   chaining to whatever import wrappers were already installed.
 
-- **External configuration:** a JSON file deferring imports in modules
+- **External configuration:** a TOML file (`unwrapt.toml`, or
+  `[tool.unwrapt]` in `pyproject.toml`) deferring imports in modules
   whose source you do not control, unioned with `__lazy_modules__`
-  below 3.15.
+  below 3.15. A JSON file holding only the deferrals is accepted too.
 
 - **Python 3.15 and later:** the interpreter owns the lazy import
   machinery; unwrapt applies only the external configuration, never
@@ -37,7 +38,7 @@ the rest of the documentation, starting with
 
 - The first pre-release of the series is `1.0.0a1`.
 
-### Changes since 1.0.0a1
+### Changes in 1.0.0a2
 
 - **Python 3.11 is supported.** The shim, the external configuration
   and the profile mode now run on Python 3.11 as well, so writing

@@ -78,9 +78,12 @@ that installs the hook would change how every later test in the same
 process imports anything. The shim and profile tests therefore run each
 scenario in a subprocess with controlled environment variables, and
 assert on facts the child prints as one JSON line; the helpers are in
-tests/support.py. In-process tests cover only what is process-local:
-configuration parsing, the report aggregation (pure functions over
-synthetic edges) and the version.
+tests/support.py. In-process tests cover what is process-local:
+finding and loading the configuration, the label scopes, the report
+aggregation (pure functions over synthetic edges) and the version.
+Even there, a fact about what a process has imported, such as the
+check that keeps tomllib out of it, is asserted in a subprocess, since
+the test process may already have imported it.
 
 One consequence for writing tests: pick deferred-import test modules
 that nothing preloads. wrapt itself (imported when the hook installs)
