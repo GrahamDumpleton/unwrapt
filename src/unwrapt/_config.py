@@ -441,13 +441,15 @@ def _config_from(document: dict[str, Any], location: str, table: str) -> Config:
         )
 
     # A relative output is relative to the file that names it, not to
-    # whatever directory the process happens to start in.
+    # whatever directory the process happens to start in. It is
+    # normalised so a path written with forward slashes reads with the
+    # platform's separators on Windows.
 
     output = profile_table.get("output")
 
     if isinstance(output, str) and not os.path.isabs(output):
         base = os.path.dirname(os.path.abspath(location))
-        output = os.path.join(base, output)
+        output = os.path.normpath(os.path.join(base, output))
 
     try:
         profile = ProfileOptions(

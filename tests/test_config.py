@@ -250,7 +250,10 @@ def test_load_config_explicit_path(tmp_path: Path) -> None:
 
 def test_load_config_absolute_output_kept(tmp_path: Path) -> None:
     output = tmp_path / "abs" / "report.json"
-    path = _write(tmp_path / "unwrapt.toml", f"[profile]\noutput = {str(output)!r}\n")
+    # A TOML literal string, so a Windows path's backslashes are kept
+    # as written rather than read as escapes.
+
+    path = _write(tmp_path / "unwrapt.toml", f"[profile]\noutput = '{output}'\n")
 
     assert load_config(path).profile.output == str(output)
 

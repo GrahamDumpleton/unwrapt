@@ -14,7 +14,7 @@ from typing import Any
 import pytest
 from support import run_python
 
-from unwrapt.report import Report, candidates, chains, summary
+from unwrapt.report import Report, candidates, chain, summary
 from unwrapt.report import main as report_main
 
 EXAMPLE = Path(__file__).parent.parent / "examples" / "worked-example"
@@ -101,9 +101,14 @@ def test_baseline_report_structure(tmp_path: Path) -> None:
 
     assert len(rows[dom_edges[0]["id"]]["shared"]) == 1
 
-    # The chain for xml explains why it loaded, outermost first.
+    # The chain for xml explains why it loaded, outermost first. It is
+    # asked for by name: whether xml ranks among the heaviest modules,
+    # which chains() follows, depends on the machine's timings.
 
-    assert "xml" in {item["module"] for item in chains(loaded)}
+    xml_chain = chain(loaded, "xml")
+
+    assert xml_chain is not None
+    assert xml_chain["module"] == "xml"
 
     # The estimate never exceeds the total, whatever the nest.
 
