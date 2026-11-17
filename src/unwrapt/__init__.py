@@ -31,7 +31,7 @@ def _format_version(parts: tuple[str, ...]) -> str:
     )
 
 
-__version_info__: tuple[str, ...] = ("1", "0", "0", "a2")
+__version_info__: tuple[str, ...] = ("1", "0", "0", "a3")
 __version__ = _format_version(__version_info__)
 
 import sys

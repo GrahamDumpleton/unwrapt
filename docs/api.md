@@ -322,8 +322,8 @@ is one.
 ## The version
 
 ```python
-unwrapt.__version__      # "1.0.0a2"
-unwrapt.__version_info__  # ("1", "0", "0", "a2")
+unwrapt.__version__      # "1.0.0a3"
+unwrapt.__version_info__  # ("1", "0", "0", "a3")
 ```
 
 `__version_info__` is a tuple of strings, three numeric parts plus an
