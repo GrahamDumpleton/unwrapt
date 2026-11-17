@@ -67,6 +67,8 @@ the code stays valid on every Python version:
 ```python
 # app.py
 
+import sys
+
 __lazy_modules__ = ["xml.dom"]
 import xml.dom
 
