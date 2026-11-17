@@ -95,7 +95,11 @@ Module-level imports the run loaded, ranked by cumulative time:
 
 - **imported / imported by**: the edge. `import a.b.c` binds `a`, so
   an edge's imported name is the full dotted name and the chain shows
-  where the binding lives.
+  where the binding lives. A relative import shows the absolute module
+  it names, so `from .serving import run_simple` in `werkzeug` shows
+  as `werkzeug.serving`. A `from` import whose names are submodules
+  shows those instead, comma separated: `from . import json` in
+  `flask` shows as `flask.json`, the module the statement is for.
 
 - **3.15 / unwrapt**: the route columns. A limit of the shim is not a
   property of the code, so the two routes are reported separately and
@@ -112,6 +116,9 @@ Module-level imports the run loaded, ranked by cumulative time:
 - **notes**: `shared (+N: ...)` lists the other modules that also
   imported the same module and are not already lazy, loaded or cache
   hit: the cost moves to the next one unless all of them are deferred.
+  The same module means the same name in the imported column, so
+  `from xml import dom` and `import xml.dom` are importers of the same
+  module, while `import xml` is not.
   `already lazy` marks an import already declared deferred, by
   `__lazy_modules__`, by the configuration, or natively on 3.15: no
   action needed.
@@ -167,7 +174,7 @@ its subtree. When every link is undone, no link is marked.
 `UNWRAPT_PROFILE_FORMAT=json`, or `Report.render_json()`, writes the
 report as JSON. It is versioned data, and a contract: the `schema`
 field says which version of the format it is, and is bumped whenever
-a field changes incompatibly. This page describes schema 2.
+a field changes incompatibly. This page describes schema 3.
 
 The JSON holds the facts the recorder saw, and nothing derived from
 them. The analysis the text report shows (the summary figures, who
@@ -206,7 +213,22 @@ Each edge carries:
 
 - `importer`, `imported`, `file` and `line`: the importing module, the
   full dotted name imported, and the statement's file and line, null
-  when the call came from C code.
+  when the call came from C code. `imported` is always absolute: a
+  relative import is resolved against the importer's package, as the
+  import system resolves it, so `from . import json` in `flask` has
+  `flask`, and `from ..other import z` in `pkg.sub` has `pkg.other`.
+
+- `written`: the name as the statement wrote it, with a relative
+  import's leading dots (`.`, `.serving`, `..other`). For an absolute
+  import it is the same as `imported`, and so it is for a native lazy
+  import on 3.15 recorded at reification, which arrives with the
+  absolute name.
+
+- `submodules`: for a `from` import, the names it imports that are
+  submodules of `imported`, by their full names, whether this call
+  loaded them or found them loaded: `["flask.json"]` for
+  `from . import json` in `flask`. Empty for anything else, and for
+  `from x import *`, whose submodules are not named.
 
 - `kind` (`import`, `from`, or `resolve` for a deferred import loaded
   at first use), `level` (`module`, `function` or `class`) and
@@ -218,7 +240,8 @@ Each edge carries:
 - `count`: how many calls the edge stands for. Repeated already-loaded
   hits, which make up most of the import calls a large application
   makes, are folded into one edge per importer, module and label set
-  (and per kind, level, and whether the hits were outermost), with a
+  (and per statement as written, submodules, kind, level, and whether
+  the hits were outermost), with a
   count, the times summed, and the first hit's file, line and parent.
   Nothing else is folded and nothing is pruned: every edge that loaded
   a module, was deferred or resolved, or made nested import calls is
@@ -249,8 +272,10 @@ Each edge carries:
 - `labels`: the index of the label set in force when the statement
   ran.
 
-`python -m unwrapt.report` reads schema 2 reports, and says so for
-any other version rather than misreading it.
+`python -m unwrapt.report` reads schema 3 reports, and says so for
+any other version rather than misreading it. A schema 2 report, from
+unwrapt 1.0.0a2, cannot be converted, since it never recorded how many
+levels up a relative import reached: profile the application again.
 
 ## Limits of this report
 
@@ -266,9 +291,11 @@ Every report ends with this block, because the report cannot see:
 
 - other workloads: the report describes the run that was profiled;
 
-- imports through `importlib.import_module` and the C import API, and
-  submodule loads inside `from` imports: their time is inside the
-  enclosing cumulative figure but they get no row of their own;
+- imports through `importlib.import_module` and the C import API:
+  their time is inside the enclosing cumulative figure but they get no
+  row of their own. A submodule a `from` import loads is named on that
+  import's row and shares its figures, except those a
+  `from x import *` brings in, which are not named;
 
 - and itself: per-import timing overhead inflates every figure.
   Compare relative sizes, against `python -X importtime` for example,

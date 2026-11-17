@@ -85,7 +85,7 @@ report = unwrapt.stop_profile(write=False)
 
 report.labels.update(app="shop", release="r3", role="host", outcome="fork")
 
-report.to_dict()       # {"schema": 2, "labels": {...}, "edges": [...], ...}
+report.to_dict()       # {"schema": 3, "labels": {...}, "edges": [...], ...}
 report.render_text()
 report.render_json()
 ```
@@ -322,8 +322,8 @@ is one.
 ## The version
 
 ```python
-unwrapt.__version__      # "1.0.0a3"
-unwrapt.__version_info__  # ("1", "0", "0", "a3")
+unwrapt.__version__      # "1.0.0"
+unwrapt.__version_info__  # ("1", "0", "0")
 ```
 
 `__version_info__` is a tuple of strings, three numeric parts plus an
@@ -349,10 +349,13 @@ plain dicts and lists, ready to serialise.
 - `who_pays(report)`: for each module loaded, the edge, importer and
   labels that paid for it, its cost, and `also_needed_by`, the other
   importers and label sets that found it already loaded, with counts.
+  A `from` import also pays for, or needs, the submodules it names, so
+  `from . import json` in `flask` pays for `flask.json`.
 
 - `candidates(report, *, min_ms=None, packages=None)`: the
   module-level imports that loaded a module, by cumulative time, each
-  with its route columns and reason, its shared importers, and
+  with the module it imported and the submodules it names, its route
+  columns and reason, its shared importers, and
   `saving_ms`, what deferring it alone would save once the cost that
   would only move to another eager importer is taken off.
 

@@ -39,7 +39,7 @@ from unwrapt._config import ProfileOptions
 # The version of the dictionary form. Bumped whenever a field changes
 # incompatibly.
 
-SCHEMA = 2
+SCHEMA = 3
 
 # How many heavy modules get an import chain in the text report.
 _CHAIN_LIMIT = 8
@@ -80,6 +80,8 @@ class EdgeRecord(TypedDict):
     parent_id: int | None
     importer: str | None
     imported: str
+    written: str
+    submodules: list[str]
     file: str | None
     line: int | None
     kind: str
@@ -164,6 +166,7 @@ class Candidate(TypedDict):
 
     edge: int
     imported: str
+    submodules: list[str]
     importer: str | None
     cum_ms: float
     self_ms: float
@@ -242,6 +245,13 @@ class Edge:
     first use. labels is the index of the label set in force, and count
     the number of already-loaded hits a folded edge stands for, with
     their times summed.
+
+    imported is the absolute name of the module the call named, with a
+    relative import resolved against the importer's package, and
+    written the name as the statement wrote it, with a relative
+    import's leading dots; None means the same as imported. submodules
+    are the names in a from-import's fromlist that are submodules of
+    imported, such as flask.json for `from . import json` in flask.
     """
 
     id: int
@@ -263,6 +273,8 @@ class Edge:
     relative: bool = False
     labels: int = 0
     count: int = 1
+    written: str | None = None
+    submodules: tuple[str, ...] = ()
 
 
 class Report:
@@ -393,10 +405,37 @@ class _Graph:
     def __init__(self, edges: Sequence[EdgeRecord]) -> None:
         self.by_id: dict[int, EdgeRecord] = {edge["id"]: edge for edge in edges}
         self.children: dict[int, list[int]] = {}
+        self._last: dict[int, int] | None = None
 
         for edge in edges:
             if edge["parent_id"] is not None:
                 self.children.setdefault(edge["parent_id"], []).append(edge["id"])
+
+    def last_in_subtree(self, root: int) -> int:
+        """The highest edge id in root's subtree, root included.
+
+        Ids are given out as calls start, and a nested call always
+        starts after the call it is inside, so this is the last call
+        to start before root's call ended, on root's own thread.
+        """
+
+        if self._last is None:
+            last: dict[int, int] = {}
+
+            # Children have higher ids than their parent, so walking
+            # down from the highest id settles every child first.
+
+            for edge_id in sorted(self.by_id, reverse=True):
+                last[edge_id] = max(
+                    [
+                        edge_id,
+                        *(last[child] for child in self.children.get(edge_id, ())),
+                    ]
+                )
+
+            self._last = last
+
+        return self._last.get(root, root)
 
     def descendants(self, root: int) -> set[int]:
         """The ids of every edge nested below root, excluding root itself."""
@@ -506,7 +545,11 @@ def who_pays(report: Report) -> list[Payment]:
     of the same name that found it loaded, under whatever labels were
     in force, is listed as also needing it, grouped by importer and
     label set with a count: that is how a later entry point shows that
-    it needs a module an earlier one paid for.
+    it needs a module an earlier one paid for. A from-import names the
+    submodules in its fromlist as well as the module it imports from,
+    so it can pay for, or need, several modules, and a from-import
+    that loaded several submodules pays for each with its one edge's
+    figures.
     """
 
     needs: dict[str, dict[tuple[str | None, int], int]] = {}
@@ -514,19 +557,16 @@ def who_pays(report: Report) -> list[Payment]:
     for edge in report.edges:
         if not edge["loaded"] and edge["kind"] != "resolve" and not edge["deferred"]:
             key = (edge["importer"], edge["labels"])
-            by_need = needs.setdefault(edge["imported"], {})
-            by_need[key] = by_need.get(key, 0) + edge["count"]
 
+            for module in _named(edge):
+                by_need = needs.setdefault(module, {})
+                by_need[key] = by_need.get(key, 0) + edge["count"]
+
+    graph = report.graph()
     payments: list[Payment] = []
-    seen: set[str] = set()
 
-    for edge in sorted(report.edges, key=lambda edge: edge["id"]):
-        module = edge["imported"]
-
-        if not edge["loaded"] or module in seen:
-            continue
-
-        seen.add(module)
+    for module, edge_id in _payers(report).items():
+        edge = graph.by_id[edge_id]
 
         also = [
             Need(importer=importer, labels=report.label_set(labels), count=count)
@@ -546,7 +586,9 @@ def who_pays(report: Report) -> list[Payment]:
             )
         )
 
-    payments.sort(key=lambda payment: (-payment["cum_ms"], payment["edge"]))
+    payments.sort(
+        key=lambda payment: (-payment["cum_ms"], payment["edge"], payment["module"])
+    )
 
     return payments
 
@@ -591,6 +633,7 @@ def candidates(
             Candidate(
                 edge=edge["id"],
                 imported=edge["imported"],
+                submodules=list(edge["submodules"]),
                 importer=edge["importer"],
                 cum_ms=edge["cum_ms"],
                 self_ms=edge["self_ms"],
@@ -853,6 +896,8 @@ def _edge_record(edge: Edge, resolution: int | None) -> EdgeRecord:
         parent_id=edge.parent_id,
         importer=edge.importer,
         imported=edge.imported,
+        written=edge.written if edge.written is not None else edge.imported,
+        submodules=list(edge.submodules),
         file=edge.file,
         line=edge.line,
         kind=edge.kind,
@@ -1111,16 +1156,72 @@ def _single_saving(
     return max(edge["cum_ms"] - sum(moved.values()), 0.0)
 
 
+def _named(edge: EdgeRecord) -> list[str]:
+    """Every module an edge names: the module it imported, and the
+    submodules its fromlist names."""
+
+    return [edge["imported"], *edge["submodules"]]
+
+
+def _targets(edge: EdgeRecord) -> list[str]:
+    """The modules a statement is for: the submodules a from-import
+    names, such as flask.json for `from . import json` in flask, and
+    otherwise the module it imported."""
+
+    return list(edge["submodules"]) or [edge["imported"]]
+
+
+def _payers(report: Report) -> dict[str, int]:
+    """The id of the edge that paid for each loaded module.
+
+    Each loaded edge claims the modules it names: the module it
+    imported as the call starts, before that module's own imports run,
+    and the submodules its fromlist names as the call ends, after
+    them. The earliest claim pays. So a package pays for itself ahead
+    of the from-imports its own body makes, and of two nested
+    from-imports naming the same submodule, the inner one, which is
+    the one that loaded it, pays.
+    """
+
+    graph = report.graph()
+    claims: dict[str, tuple[float, int, int]] = {}
+
+    for edge in report.edges:
+        if not edge["loaded"]:
+            continue
+
+        # A call starts at its own id, and ends after the last call to
+        # start inside it. Two calls ending at the same point are
+        # nested, and the inner one, with the higher id, ends first.
+
+        edge_id = edge["id"]
+        started = (float(edge_id), 0, edge_id)
+        ended = (graph.last_in_subtree(edge_id) + 0.5, -edge_id, edge_id)
+
+        named = [(edge["imported"], started)]
+        named.extend((module, ended) for module in edge["submodules"])
+
+        for module, claim in named:
+            if module not in claims or claim < claims[module]:
+                claims[module] = claim
+
+    return {module: claim[2] for module, claim in claims.items()}
+
+
 def _shared(report: Report, edge: EdgeRecord) -> list[str]:
     """The other modules that also import this edge's module and are not
     already lazy, loaded or cache hit. A shared module only stays
     unloaded if every eager importer of it is deferred.
 
-    The same module means the same imported name, so `import xml.dom`
+    The same module means the same module name, so `import xml.dom`
     and `from xml.dom import Node` count as importers of the same
-    module while `import xml` alone does not.
+    module while `import xml` alone does not. A from-import whose
+    fromlist names submodules is an importer of those submodules
+    rather than of the package it imports them from, so `from xml
+    import dom` counts with `import xml.dom`.
     """
 
+    targets = set(_targets(edge))
     others: set[str] = set()
 
     for candidate in report.edges:
@@ -1130,7 +1231,7 @@ def _shared(report: Report, edge: EdgeRecord) -> list[str]:
             and candidate["level"] == "module"
             and candidate["kind"] != "resolve"
             and not candidate["already_lazy"]
-            and candidate["imported"] == edge["imported"]
+            and not targets.isdisjoint(_targets(candidate))
         ):
             others.add(candidate["importer"])
 
@@ -1175,10 +1276,12 @@ _LIMITS = [
     "The report describes the workload that was profiled, not every"
     " workload: an import cheap on one path may be unavoidable on"
     " another.",
-    "Imports made through importlib.import_module and the C import API,"
-    " and submodule loads inside `from` imports, do not pass through the"
-    " hook as edges of their own: their time is included in the"
-    " enclosing cumulative figure but gets no row.",
+    "Imports made through importlib.import_module and the C import API"
+    " do not pass through the hook as edges of their own: their time is"
+    " included in the enclosing cumulative figure but gets no row. A"
+    " submodule a `from` import loads is named on that import's row and"
+    " shares its figures, except those a `from x import *` brings in,"
+    " which are not named.",
     "Per-import timing overhead inflates every figure. Compare relative"
     " sizes, against `python -X importtime` for example, and never treat"
     " a millisecond figure as a wall-clock promise.",
@@ -1226,7 +1329,7 @@ def _render_text(
 
     if best is not None:
         lines.append(
-            f"Best single cut: {_who(best)} -> {best['imported']}"
+            f"Best single cut: {_who(best)} -> {_imported_cell(best)}"
             f" ({_ms(best['cum_ms'])} ms cumulative)"
         )
 
@@ -1279,7 +1382,7 @@ def _render_text(
             [
                 _ms(row["cum_ms"]),
                 _ms(row["self_ms"]),
-                row["imported"],
+                _imported_cell(edge),
                 _who(edge),
                 _native_cell(edge),
                 _unwrapt_cell(edge),
@@ -1333,7 +1436,7 @@ def _render_text(
                 continue
 
             parts = [
-                f"    {_who(link)} -> {link['imported']}",
+                f"    {_who(link)} -> {_imported_cell(link)}",
                 f"cum {_ms(link['cum_ms'])} ms",
                 f"3.15 {_native_cell(link)}",
                 f"unwrapt {_unwrapt_cell(link)}",
@@ -1413,6 +1516,13 @@ def _who(edge: EdgeRecord) -> str:
     """The importer column: its module name or a placeholder."""
 
     return _name(edge["importer"])
+
+
+def _imported_cell(edge: EdgeRecord) -> str:
+    """The imported column: the module the statement is for, or the
+    submodules a from-import names, comma separated."""
+
+    return ", ".join(_targets(edge))
 
 
 def _name(module: str | None) -> str:

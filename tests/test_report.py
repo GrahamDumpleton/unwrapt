@@ -51,6 +51,8 @@ def edge(
     relative: bool = False,
     labels: int = 0,
     count: int = 1,
+    written: str | None = None,
+    submodules: tuple[str, ...] = (),
 ) -> Edge:
     return Edge(
         id=edge_id,
@@ -72,6 +74,8 @@ def edge(
         relative=relative,
         labels=labels,
         count=count,
+        written=written,
+        submodules=submodules,
     )
 
 
@@ -90,7 +94,7 @@ def test_to_dict_is_the_versioned_schema() -> None:
 
     data = report.to_dict()
 
-    assert data["schema"] == SCHEMA == Report.SCHEMA == 2
+    assert data["schema"] == SCHEMA == Report.SCHEMA == 3
     assert data["labels"] == {
         "app": "shop",
         "release": "r3",
@@ -114,6 +118,8 @@ def test_to_dict_is_the_versioned_schema() -> None:
         "parent_id": None,
         "importer": "app",
         "imported": "csv",
+        "written": "csv",
+        "submodules": [],
         "file": "app.py",
         "line": 3,
         "kind": "import",
@@ -427,6 +433,122 @@ def test_shared_note_lists_other_importers() -> None:
     # module.
 
     assert rows[3]["shared"] == []
+
+
+def test_relative_edge_keeps_the_statement_as_written() -> None:
+    report = report_of(
+        edge(
+            0,
+            "flask",
+            "flask",
+            kind="from",
+            relative=True,
+            written=".",
+            submodules=("flask.json",),
+        ),
+        edge(1, "csv", "app"),
+    )
+
+    relative, absolute = report.edges
+
+    assert relative["imported"] == "flask"
+    assert relative["written"] == "."
+    assert relative["submodules"] == ["flask.json"]
+
+    # An edge built without the written form records the name it
+    # imported.
+
+    assert absolute["written"] == "csv"
+    assert absolute["submodules"] == []
+
+
+def test_shared_note_matches_submodules() -> None:
+    report = report_of(
+        edge(0, "xml", "app", kind="from", submodules=("xml.dom",), cum_ms=9.0),
+        edge(1, "xml.dom", "mypkg.analytics", loaded=False),
+        edge(2, "xml", "mypkg.client", kind="from", loaded=False),
+        edge(3, "flask", "__main__", kind="from", cum_ms=5.0),
+        edge(4, "flask", "flask.ctx", kind="from", submodules=("flask.typing",)),
+    )
+
+    rows = {row["edge"]: row for row in candidates(report)}
+
+    # `from xml import dom` is an importer of xml.dom, as `import
+    # xml.dom` is, and not of the xml package, which a from-import of
+    # an attribute of xml would be.
+
+    assert rows[0]["submodules"] == ["xml.dom"]
+    assert rows[0]["shared"] == ["mypkg.analytics"]
+
+    # Binding a submodule of flask does not make flask.ctx an importer
+    # of flask for the entry point's `from flask import Flask`.
+
+    assert rows[3]["shared"] == []
+
+
+def test_imported_cell_lists_submodules() -> None:
+    report = report_of(
+        edge(
+            0,
+            "pkg",
+            "app",
+            kind="from",
+            submodules=("pkg.a", "pkg.b"),
+            cum_ms=5.0,
+            self_ms=5.0,
+        ),
+    )
+
+    text = report.render_text()
+
+    assert "pkg.a, pkg.b  app" in text
+    assert "app -> pkg.a, pkg.b" in text
+
+
+def test_who_pays_for_submodules_of_from_imports() -> None:
+    report = report_of(
+        # `from pkg import a` obtains pkg as it starts, and the package's
+        # own `from . import a`, nested inside it, loads pkg.a.
+        edge(0, "pkg", "app", kind="from", submodules=("pkg.a",), cum_ms=9.0),
+        edge(
+            1,
+            "pkg",
+            "pkg",
+            parent_id=0,
+            kind="from",
+            relative=True,
+            written=".",
+            submodules=("pkg.a",),
+            cum_ms=4.0,
+        ),
+        # `import other.x` loads other.x, which a later from-import that
+        # loads something else also names: the first claim pays.
+        edge(2, "other.x", "app", cum_ms=3.0),
+        edge(
+            3,
+            "other",
+            "app",
+            kind="from",
+            submodules=("other.x", "other.y"),
+            cum_ms=2.0,
+        ),
+        # A cache hit naming a submodule needs it.
+        edge(4, "pkg", "late", kind="from", submodules=("pkg.a",), loaded=False),
+    )
+
+    paid = {payment["module"]: payment for payment in who_pays(report)}
+
+    assert {module: payment["edge"] for module, payment in paid.items()} == {
+        "pkg": 0,
+        "pkg.a": 1,
+        "other.x": 2,
+        "other": 3,
+        "other.y": 3,
+    }
+
+    assert paid["pkg.a"]["also_needed_by"] == [
+        {"importer": "late", "labels": {}, "count": 1}
+    ]
 
 
 def test_already_lazy_edges_are_not_savings() -> None:

@@ -70,7 +70,12 @@ exit handler and write a copy of the host's report each. See the
 For every import call through the hook, including `sys.modules` cache
 hits, one edge is recorded:
 
-- the importing module and the imported name;
+- the importing module and the absolute name of the module imported,
+  with a relative import resolved against the importer's package, and
+  the name as the statement wrote it;
+
+- for a `from` import, which of the names it imports are submodules,
+  such as `flask.json` for `from . import json` in `flask`;
 
 - whether it was an `import` or a `from` form, whether it was
   relative, and whether the statement sat at module, function or

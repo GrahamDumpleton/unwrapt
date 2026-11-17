@@ -34,7 +34,7 @@ method from the assistant's side of the table.
 
 ## The JSON schema
 
-The report the assistant receives is schema 2, described field by
+The report the assistant receives is schema 3, described field by
 field on [reading the report](reading-the-report.md#the-json-form):
 `schema` (bumped if a field ever changes incompatibly), `unwrapt` and
 `python` (versions), `labels` (what the report is of), `label_sets`,
@@ -46,7 +46,12 @@ already-loaded hits, with:
 
 - `parent_id` (the enclosing import call, so chains can be walked);
 
-- `importer`, `imported`, `file` and `line`;
+- `importer`, `imported` (always absolute, a relative import
+  resolved), `file` and `line`;
+
+- `written` (the name as the statement wrote it, with a relative
+  import's leading dots) and `submodules` (the names a `from` import
+  imports that are submodules, by their full names);
 
 - `kind` (`import`, `from`, or `resolve` for a deferred import loaded
   at first use), `level` (module, function or class) and `relative`;

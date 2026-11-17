@@ -3,19 +3,22 @@
 Profile mode installs a recording hook instead of the shim hook, so it
 is as process global as the shim. Children run with UNWRAPT_PROFILE
 set and a JSON report path, and the tests assert on the report
-structure, never on absolute millisecond values.
+structure, never on absolute millisecond values. The recorder's pure
+name helpers are the exception, tested in process.
 """
 
 import json
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 from support import run_python, write_module
 
 import unwrapt
-from unwrapt.report import Report, summary
+from unwrapt._profile import _resolve_name, _submodules
+from unwrapt.report import Report, candidates, heavy_modules, summary, who_pays
 
 PROFILE = {
     "UNWRAPT_PROFILE": "1",
@@ -335,7 +338,7 @@ def test_json_schema_shape(tmp_path: Path) -> None:
         tmp_path,
     )
 
-    assert report["schema"] == 2
+    assert report["schema"] == 3
     assert report["unwrapt"] == unwrapt.__version__
     assert "python" in report
     assert report["labels"] == {}
@@ -362,6 +365,8 @@ def test_json_schema_shape(tmp_path: Path) -> None:
         "parent_id",
         "importer",
         "imported",
+        "written",
+        "submodules",
         "file",
         "line",
         "kind",
@@ -441,6 +446,144 @@ def test_relative_import_is_flagged(tmp_path: Path) -> None:
     )
 
     assert edge["defer"] == {"native": True, "unwrapt": False, "reason": "relative"}
+
+
+def test_relative_imports_are_resolved(tmp_path: Path) -> None:
+    write_module(
+        tmp_path,
+        "relpkg.__init__",
+        "from . import alpha\nfrom .sub import VALUE\n",
+    )
+    write_module(tmp_path, "relpkg.alpha", "A = 1\n")
+    write_module(tmp_path, "relpkg.sub.__init__", "from ..other import Z\nVALUE = 1\n")
+    write_module(tmp_path, "relpkg.other", "Z = 2\n")
+
+    # The entry point's from-import is the outer call, and the package's
+    # own `from . import alpha` the inner one that loads relpkg.alpha.
+
+    facts = _report_facts(
+        """
+        import unwrapt
+
+        unwrapt.install_from_env()
+
+        from relpkg import alpha
+        """,
+        tmp_path,
+    )
+
+    edges = {
+        (edge["importer"], edge["written"]): edge
+        for edge in facts["edges"]
+        if edge["importer"] is not None
+        and edge["importer"].partition(".")[0] in ("__main__", "relpkg")
+    }
+
+    # Each relative import is recorded by the module it names, with the
+    # statement as written beside it, and still marked relative.
+
+    alpha = edges[("relpkg", ".")]
+
+    assert alpha["imported"] == "relpkg"
+    assert alpha["submodules"] == ["relpkg.alpha"]
+    assert alpha["relative"] is True
+    assert alpha["defer"]["reason"] == "relative"
+
+    sub = edges[("relpkg", ".sub")]
+
+    assert sub["imported"] == "relpkg.sub"
+    assert sub["submodules"] == []
+
+    other = edges[("relpkg.sub", "..other")]
+
+    assert other["imported"] == "relpkg.other"
+    assert other["relative"] is True
+
+    # An absolute from-import names its submodules too, and is not
+    # relative.
+
+    outer = edges[("__main__", "relpkg")]
+
+    assert outer["imported"] == "relpkg"
+    assert outer["submodules"] == ["relpkg.alpha"]
+    assert outer["relative"] is False
+
+    # The candidates name the modules each statement is for, heavy
+    # modules group by the top-level package, and no chain link is
+    # blank.
+
+    report = Report.from_dict(facts)
+
+    rows = {
+        (row["importer"], row["imported"], tuple(row["submodules"]))
+        for row in candidates(report)
+    }
+
+    assert rows == {
+        ("__main__", "relpkg", ("relpkg.alpha",)),
+        ("relpkg", "relpkg", ("relpkg.alpha",)),
+        ("relpkg", "relpkg.sub", ()),
+        ("relpkg.sub", "relpkg.other", ()),
+    }
+
+    text = report.render_text()
+
+    assert "__main__ -> relpkg.alpha" in text
+    assert " ->   cum" not in text
+
+    heavy = {entry["module"] for entry in heavy_modules(report)}
+
+    assert "relpkg" in heavy
+    assert not heavy & {"", "sub", "other", "alpha"}
+
+    # The outer call obtains relpkg as it starts and pays for it; the
+    # inner from-import loads relpkg.alpha and pays for that.
+
+    paid = {payment["module"]: payment["edge"] for payment in who_pays(report)}
+
+    assert paid["relpkg"] == outer["id"]
+    assert paid["relpkg.alpha"] == alpha["id"]
+    assert paid["relpkg.sub"] == sub["id"]
+    assert paid["relpkg.other"] == other["id"]
+
+
+def test_resolve_name_follows_importlib() -> None:
+    package = {"__name__": "pkg.mod", "__package__": "pkg"}
+
+    assert _resolve_name("", package, 1) == "pkg"
+    assert _resolve_name("sub", package, 1) == "pkg.sub"
+
+    deep = {"__name__": "pkg.sub.mod", "__package__": "pkg.sub"}
+
+    assert _resolve_name("other", deep, 2) == "pkg.other"
+    assert _resolve_name("", deep, 2) == "pkg"
+
+    # Without __package__, __spec__.parent, then __name__, less its last
+    # part unless the module is a package.
+
+    spec = SimpleNamespace(parent="pkg.sub")
+
+    assert _resolve_name("x", {"__name__": "pkg.sub.m", "__spec__": spec}, 1) == (
+        "pkg.sub.x"
+    )
+    assert _resolve_name("x", {"__name__": "pkg.sub.m"}, 1) == "pkg.sub.x"
+    assert _resolve_name("x", {"__name__": "pkg.sub", "__path__": []}, 1) == (
+        "pkg.sub.x"
+    )
+
+    # Whatever cannot be resolved is recorded as written: beyond the
+    # top-level package, no package at all, or no globals.
+
+    assert _resolve_name("x", package, 3) == "x"
+    assert _resolve_name("x", {"__name__": "top"}, 1) == "x"
+    assert _resolve_name("x", None, 1) == "x"
+
+
+def test_submodules_are_the_loaded_fromlist_modules() -> None:
+    import xml.dom  # noqa: F401
+
+    assert _submodules("xml", ("dom", "no_such_module", "*")) == ("xml.dom",)
+    assert _submodules("xml", ()) == ()
 
 
 def test_scoped_labels_are_recorded(tmp_path: Path) -> None:

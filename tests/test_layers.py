@@ -318,7 +318,7 @@ def test_stop_profile_writes_where_the_options_say(tmp_path: Path) -> None:
         cwd=tmp_path,
     )
 
-    assert facts == {"schema": 2}
+    assert facts == {"schema": 3}
 
     written = list(tmp_path.glob("report-*.json"))
 

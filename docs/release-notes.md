@@ -38,6 +38,35 @@ the rest of the documentation, starting with
 
 - The first pre-release of the series is `1.0.0a1`.
 
+### Changes in 1.0.0a3
+
+- **The profile report names relative imports by the modules they
+  load.** A relative import was recorded by the name as written, so
+  `from . import x` showed as a blank module, with every such import
+  across unrelated packages merged into one row and one shared list,
+  and `from .sansio.app import App` in `flask` was grouped as a heavy
+  module called `sansio`. Each edge's `imported` is now the absolute
+  name, resolved against the importer's package as the import system
+  resolves it, so the candidates, heavy modules, chains and shared
+  lists all use the real module names. The rows are still marked
+  relative, and still not deferrable by the shim.
+
+- **A `from` import names the submodules it loads.** Each edge now
+  carries `submodules`, the names a `from` import imports that are
+  submodules, by their full names, so `from . import json` in `flask`
+  shows in the text report as `flask.json`, the module that cost the
+  time, rather than as the package it came from. This applies to
+  absolute `from` imports too. `who_pays()` attributes each submodule
+  to the import that loaded it, and the shared lists match a
+  `from xml import dom` with an `import xml.dom` elsewhere.
+
+- **The JSON form is schema 3.** Each edge gains `written`, the name
+  as the statement wrote it with a relative import's leading dots, and
+  `submodules`; `imported` is always absolute. Schema 2 reports, from
+  1.0.0a2, are not read, since they never recorded how far up a
+  relative import reached: profile again. See
+  [reading the report](reading-the-report.md#the-json-form).
+
 ### Changes in 1.0.0a2
 
 - **Python 3.11 is supported.** The shim, the external configuration

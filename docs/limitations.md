@@ -62,6 +62,13 @@ before the bootstrap: none of them pass through the hook, so none of
 them are deferred. The profile report records what does pass through
 it, and its limits block says the same about the measurement.
 
+The submodules a `from` import loads (`from . import json`, which
+loads `flask.json`) do not pass through the hook either: the import
+system loads them directly once the statement's own import returns.
+The profile names them on the `from` import's edge, which carries
+their time, except for those that `from x import *` brings in through
+a package's `__all__`, which are not named.
+
 ## Per-import overhead
 
 Every import statement in the process passes through the hook while

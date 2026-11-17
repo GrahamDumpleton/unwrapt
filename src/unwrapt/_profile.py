@@ -48,11 +48,14 @@ ImportFunction = Callable[..., types.ModuleType]
 _StackEntry: TypeAlias = tuple[int, list[float]]
 
 # A folded run of already-loaded hits is keyed by importer, module and
-# label set, and by the form facts the analysis reads (kind, level,
-# relative), and by whether the hits were outermost, so that the
-# folded times still add up to the total import time.
+# label set, by the statement as written and the submodules it named,
+# and by the form facts the analysis reads (kind, level, relative),
+# and by whether the hits were outermost, so that the folded times
+# still add up to the total import time.
 
-_FoldKey: TypeAlias = tuple[str | None, str, int, str, str, bool, bool]
+_FoldKey: TypeAlias = tuple[
+    str | None, str, str, tuple[str, ...], int, str, str, bool, bool
+]
 
 
 class _Fold:
@@ -537,11 +540,25 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
                 importer = _importer_name(globals)
                 loaded = len(sys.modules) != before
 
+                # A relative import is recorded by the absolute module
+                # it names, with the statement as written kept beside
+                # it, and a from-import also by the submodules its
+                # fromlist names. already_lazy is still checked against
+                # the name as passed, as the shim checks it, so a
+                # relative import is never marked lazy by a declaration
+                # of the absolute name: the shim would not defer it.
+
+                imported = _resolve_name(name, globals, level) if level > 0 else name
+                written = "." * level + name if level > 0 else name
+                submodules = _submodules(imported, fromlist) if fromlist else ()
+
                 edge = Edge(
                     id=edge_id,
                     parent_id=parent_id,
                     importer=importer,
-                    imported=name,
+                    imported=imported,
+                    written=written,
+                    submodules=submodules,
                     kind="from" if fromlist else "import",
                     level_name=_import_level(locals, globals),
                     line=line,
@@ -574,7 +591,9 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
                 ):
                     key = (
                         importer,
-                        name,
+                        imported,
+                        written,
+                        submodules,
                         labels,
                         edge.kind,
                         edge.level_name,
@@ -598,6 +617,73 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
             local.reentrant = False
 
     return _profiling_import
+
+
+def _resolve_name(name: str, globals: Mapping[str, object] | None, level: int) -> str:
+    """The absolute name a relative import names. Never raises.
+
+    The package comes from the importer's globals as importlib's own
+    _calc___package__ finds it: __package__, then __spec__.parent,
+    then __name__, less its last part for a module that is not itself
+    a package. The name is then resolved against it as importlib's
+    _resolve_name does, so `from . import x` names the package itself
+    and `from ..other import z` the sibling of the importer's parent.
+    importlib is not called, because it warns when __package__ and
+    __spec__ disagree. Whatever cannot be resolved, such as a relative
+    import beyond the top-level package, which the import itself
+    rejects, is recorded as written.
+    """
+
+    try:
+        if globals is None:
+            return name
+
+        package = globals.get("__package__")
+
+        if package is None:
+            spec = globals.get("__spec__")
+            package = getattr(spec, "parent", None) if spec is not None else None
+
+        if package is None:
+            package = globals.get("__name__")
+
+            if isinstance(package, str) and "__path__" not in globals:
+                package = package.rpartition(".")[0]
+
+        if not isinstance(package, str) or not package:
+            return name
+
+        bits = package.rsplit(".", level - 1)
+
+        if len(bits) < level:
+            return name
+
+        return f"{bits[0]}.{name}" if name else bits[0]
+
+    except Exception:
+        return name
+
+
+def _submodules(imported: str, fromlist: Sequence[str]) -> tuple[str, ...]:
+    """The names in a fromlist that are submodules of the module
+    imported, as loaded once the call is done. Never raises.
+
+    Whether this call loaded them or found them loaded does not
+    matter: the statement needs them either way. A `*` is skipped, so
+    the submodules a package's __all__ brings in are not named.
+    """
+
+    try:
+        modules = sys.modules
+
+        return tuple(
+            f"{imported}.{item}"
+            for item in fromlist
+            if isinstance(item, str) and item != "*" and f"{imported}.{item}" in modules
+        )
+
+    except Exception:
+        return ()
 
 
 def _importer_name(globals: Mapping[str, object] | None) -> str | None:
