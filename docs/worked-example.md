@@ -34,7 +34,7 @@ The shape of what comes back (abridged; the figures are illustrative,
 the assertions in CI are not):
 
 ```
-Summary: 9.4 ms total import time, 13 modules loaded, 47 edges (61 import calls)
+Summary: 9.4 ms total import time, 21 modules loaded (15 packages), 36 edges (53 import calls)
 Estimated saving if every deferrable edge were deferred: 8.8 ms (conservative; edge times nest and are not additive)
 Best single cut: __main__ -> myapp.web (3.2 ms cumulative)
 
@@ -47,7 +47,17 @@ Candidates: module-level imports, ranked by cumulative time
      0.6      0.4  decimal          myapp.web       yes      yes
      0.5      0.5  wave             myapp.client    yes      yes
      0.3      0.3  difflib          myapp.client    yes   no (1)
+     ...
+     0.1      0.1  datetime         sqlite3.dbapi2  yes      yes  used at load (line 33), deferring saves nothing
 ```
+
+Below the application's own rows come the standard library's, among
+them one the report has checked in its importer's source:
+`sqlite3.dbapi2` uses `datetime` at module level as it loads, so that
+row is marked `used at load`, saves nothing, and is left out of the
+estimate. The standard library is not code the example owns anyway,
+and the `packages` filter (`UNWRAPT_PROFILE_PACKAGES=myapp`) would
+hide those rows.
 
 ## Reading it
 
@@ -60,7 +70,8 @@ top, a thin wrapper pulling in a nest.
 The triage, in the guide's order:
 
 - `myapp.web` and `myapp.analytics`: module-level plain imports, used
-  only inside functions after import. **Defer**, in the modules that
+  only inside functions after import, which is why the report marks
+  neither `used at load`. **Defer**, in the modules that
   import them. (Or defer the entry point's `import myapp.web` alone:
   the chain's best cut, which removes the whole subtree.)
 

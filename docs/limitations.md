@@ -58,9 +58,34 @@ the import statement.
 ## What the hook cannot see
 
 `importlib.import_module`, the C import API, and imports that happen
-before the bootstrap: none of them pass through the hook, so none of
-them are deferred. The profile report records what does pass through
-it, and its limits block says the same about the measurement.
+before the bootstrap: none of them are deferred. The first and the
+last never pass through the hook. An extension module's imports
+through the C API do, but they arrive with the globals of the import
+system's own frame rather than those of a module with a
+`__lazy_modules__`, so nothing marks them; the profile credits them to
+the extension, and marks them `extension-module`, deferrable by
+neither route. The profile report records what passes through the
+hook, and its limits block says the same about the measurement.
+
+The profile looks for an import's statement as the nearest frame,
+from the hook's caller up, whose globals are the ones the import was
+given, which finds it through a hook that wraps `builtins.__import__`
+over the recorder and passes calls on. It looks at most eight frames
+up, and a wrapper that passes other globals than the statement's has
+its own frame recorded as the place instead.
+
+On Python 3.15 a native lazy import is recorded when native reifies
+it, and is credited to the module whose code first used the name:
+native passes that module's globals, and nothing visible to the hook
+names the declaring module, so `modb` reading `moda.x` shows as `modb`
+importing `x`. See
+[the lazy import registry](python-3-15.md#the-lazy-import-registry).
+
+The profile's check for an import used while its importer loads reads
+the importer's source, so it sees only uses the source spells out:
+a name reached through `getattr()` or `globals()` is not seen until
+the import is deferred, when the deferral sections report the resolve
+as used at load.
 
 The submodules a `from` import loads (`from . import json`, which
 loads `flask.json`) do not pass through the hook either: the import

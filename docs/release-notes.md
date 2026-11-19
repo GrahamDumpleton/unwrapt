@@ -38,6 +38,96 @@ the rest of the documentation, starting with
 
 - The first pre-release of the series is `1.0.0a1`.
 
+### Changes in 1.0.0a5
+
+- **The profile finds the import statement through a hook wrapping
+  `__import__`.** The recorder took an import's file and line from
+  the frame that called it, which is the wrapper's when another hook
+  wraps `builtins.__import__` over the recorder and passes the call on.
+  Every edge recorded under such a wrapper named the wrapper's line,
+  and `import a.b as c`, recognised by reading the statement's source
+  line, was reported deferrable by the shim, and advised. The recorder
+  now takes the nearest frame, from its caller up, whose globals are
+  the ones the import was given, which is the statement's own; with
+  no wrapper that is the first frame it looks at. See
+  [what the hook cannot see](limitations.md#what-the-hook-cannot-see).
+
+- **Imports made by extension modules are credited to them.** A
+  compiled extension imports through the C API, which passes the
+  globals of the topmost Python frame, the import system's own, so
+  such an import was recorded with the importer `importlib._bootstrap`,
+  at module level, and deferrable by both routes, which nothing can
+  do: with pandas loaded, these filled most of the candidates. The
+  importer is now the extension module being loaded, as the import
+  system's frame names it, with no file or line; `defer` gives the
+  reason `extension-module`, deferrable by neither route. Such an
+  import is never a candidate or a by-importer entry, and the plan
+  counts it as an eager importer, since the module it imports loads
+  whenever the extension does. In the import chains its route columns
+  read `no (3)`. See
+  [reading the report](reading-the-report.md#import-chains).
+
+- **Modules loaded counts modules.** The summary's `modules_loaded`
+  was the number of top-level packages, which read as wrong beside a
+  load of several hundred modules. It is now the number of modules the
+  run added to `sys.modules`, from each edge's new `self_modules`, and
+  the new `packages_loaded` is the number of top-level packages; the
+  text summary shows both, as does `--compare`. See
+  [the summary header](reading-the-report.md#the-summary-header).
+
+- **Declared lazy and deferred in this run are separate facts.** An
+  import named in `__lazy_modules__`, or in the configuration's
+  `lazy_modules`, was marked `already_lazy` whatever the run did with
+  it, so an eager profile, with deferral off, showed it with a saving
+  of 0, and left it out of the estimated saving. Each edge now carries
+  `declared_lazy`, for the declaration, and `already_lazy`, for an
+  import this run deferred, by the shim or natively. A declared import
+  that loaded eagerly is not offered as a new candidate or best cut,
+  but its cost is shown, counted in the estimated saving, and noted:
+  `declared lazy, loaded eagerly: deferral is off in this run`, with a
+  summary line counting them. See
+  [reading the report](reading-the-report.md#candidates).
+
+- **The report no longer advises deferring an import used at load.**
+  Deferring an import its importer uses at module level saves
+  nothing: the proxy resolves before the importer has finished
+  loading. For each candidate it lists, the report now reads the
+  importer's source for a use of the name the import binds in code
+  that runs at load (the module body, class bodies, decorators,
+  default arguments, and annotations where the profiled Python
+  evaluates them), and marks such a row `used_at_load`, with the line,
+  a saving of 0, and no place in the plan, the estimated saving or the
+  best cuts. With deferral on, `deferred_used()` marks a resolve made
+  inside the import call that loaded its importer `used_at_load` too,
+  and the text says the declaration can go: that is how a use through
+  `getattr()` or `globals()`, which the source check cannot see,
+  shows. See [used at load](reading-the-report.md#used-at-load).
+  `summary()` takes `min_ms` and `packages`, like `candidates()`, for
+  the candidates it checks.
+
+- **On Python 3.15, an eager import of a name pending elsewhere is
+  eager.** `sys.lazy_modules` holds names only, so while one module
+  had `wave` pending from a `lazy import`, an eager `import wave` in
+  another was taken for a native reification: the profile recorded it
+  `native_lazy` and already lazy, with a saving of 0, and the shim
+  left it to native, so a configuration entry for it was not applied.
+  Both layers now tell the two apart by the instruction the
+  statement's frame is at, `IMPORT_NAME` for an eager statement. A
+  native lazy import is still credited to the module whose code first
+  used it, which is not the declaring one when another module reached
+  the binding through it: the hook is never given the declaring
+  module, now documented. See
+  [the lazy import registry](python-3-15.md#the-lazy-import-registry).
+
+- **The JSON form is schema 4.** Each edge gains `self_modules` and
+  `declared_lazy`, `already_lazy` now means deferred in this run, and
+  `defer.reason` can be `extension-module`. In the analysis,
+  `summary()` gains `packages_loaded`, `candidates()` rows gain
+  `declared_lazy` and `used_at_load`, and `deferred_used()` entries
+  gain `used_at_load`. Schema 3 reports are not read, since they
+  cannot be corrected after the run: profile again. See
+  [the JSON form](reading-the-report.md#the-json-form).
+
 ### Changes in 1.0.0a4
 
 - **The heavy modules section is short, and filtered.** The text

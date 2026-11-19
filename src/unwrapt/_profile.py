@@ -33,17 +33,46 @@ from typing import Literal, TypeAlias, cast
 
 from unwrapt import _labels
 from unwrapt._compat import has_native_lazy_imports, mark_profile
-from unwrapt._config import Config, ProfileOptions, is_candidate, is_native_pending
+from unwrapt._config import (
+    Config,
+    ProfileOptions,
+    is_candidate,
+    is_import_statement,
+    is_native_pending,
+    statement_frame,
+)
 from unwrapt._records import Resolution
 from unwrapt._report import Edge, Report, build_report
 
 ImportFunction = Callable[..., types.ModuleType]
 
+# The __name__ of the import system's own modules, which an import made
+# from C code while a module loads reports as its importer: the
+# importlib names once importlib is imported, and the frozen names
+# before.
+
+_IMPORT_SYSTEM = frozenset(
+    {
+        "importlib._bootstrap",
+        "importlib._bootstrap_external",
+        "_frozen_importlib",
+        "_frozen_importlib_external",
+    }
+)
+
+# The _imp functions that create or execute an extension module, or a
+# built-in one, during which its initialisation code runs.
+
+_EXTENSION_LOADERS = frozenset(
+    {"create_builtin", "exec_builtin", "create_dynamic", "exec_dynamic"}
+)
+
 # Each entry of a thread's stack of in-progress import calls holds the
 # id of the call (which is the parent_id of anything it imports) and an
 # accumulator of the time spent in nested import calls (which turns
-# cumulative time into self time) and of how many there were (which
-# says whether the call can be folded).
+# cumulative time into self time), of how many there were (which says
+# whether the call can be folded), and of the modules they added to
+# sys.modules (which turns the call's count into its own).
 
 _StackEntry: TypeAlias = tuple[int, list[float]]
 
@@ -83,7 +112,7 @@ class _Fold:
 class _ResolveToken:
     """The state of one resolve between begin_resolve and end_resolve."""
 
-    __slots__ = ("child_time", "edge_id", "labels", "parent_id", "start")
+    __slots__ = ("before", "child_time", "edge_id", "labels", "parent_id", "start")
 
     def __init__(
         self,
@@ -91,11 +120,13 @@ class _ResolveToken:
         parent_id: int | None,
         child_time: list[float],
         start: float,
+        before: int,
     ) -> None:
         self.edge_id = edge_id
         self.parent_id = parent_id
         self.child_time = child_time
         self.start = start
+        self.before = before
         self.labels = _labels.current
 
 
@@ -183,10 +214,12 @@ class Recorder:
             edge_id = self.next_id
             self.next_id += 1
 
-        child_time = [0.0, 0.0]
+        child_time = [0.0, 0.0, 0.0]
         stack.append((edge_id, child_time))
 
-        return _ResolveToken(edge_id, parent_id, child_time, time.perf_counter())
+        return _ResolveToken(
+            edge_id, parent_id, child_time, time.perf_counter(), len(sys.modules)
+        )
 
     def end_resolve(
         self,
@@ -204,6 +237,7 @@ class Recorder:
 
         state = cast(_ResolveToken, token)
         elapsed = (time.perf_counter() - state.start) * 1000.0
+        added = len(sys.modules) - state.before
 
         stack = self.stack()
 
@@ -213,6 +247,7 @@ class Recorder:
         if stack:
             stack[-1][1][0] += elapsed
             stack[-1][1][1] += 1.0
+            stack[-1][1][2] += added
 
         if resolution is None or not self.active:
             return
@@ -231,9 +266,11 @@ class Recorder:
             self_ms=elapsed - state.child_time[0],
             native_lazy=False,
             already_lazy=True,
+            declared_lazy=True,
             resolves=self.deferred_edges.get(record),
             used_in=resolution.used_in,
             labels=state.labels,
+            self_modules=int(added - state.child_time[2]),
         )
 
         with self.lock:
@@ -420,9 +457,9 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
     """Build the recording hook function for one recorder layer.
 
     The hook is a closure over the layer rather than a bound method, so
-    the eval loop calls a plain function and the importing frame stays
-    exactly one level up, which is where the hook reads the statement's
-    file and line.
+    the eval loop calls a plain function and the importing frame is
+    one level up, where the hook looks first for the statement's file
+    and line.
     """
 
     next_import = recorder.next_import
@@ -473,20 +510,28 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
             parent_id = stack[-1][0] if stack else None
 
             before = len(sys.modules)
-            child_time = [0.0, 0.0]
+            child_time = [0.0, 0.0, 0.0]
             labels = _labels.current
 
-            # The importing frame is one level up: the hook is a plain
-            # function called directly by the eval loop, with no wrapper
-            # layers of its own. Calls made from C code have no such
-            # frame, and the line is recorded as None rather than
-            # guessed.
+            # The importing frame is the statement's own, which passed
+            # its module's globals: one level up when the eval loop calls
+            # the hook directly, further when another hook wraps
+            # __import__ over this one and passes the call on.
+            # The common case costs one identity check. A call made from
+            # C code has no frame of its own, and the place is recorded
+            # as None rather than guessed.
 
             try:
-                caller = sys._getframe(1)
+                caller: types.FrameType | None = statement_frame(
+                    sys._getframe(1), globals
+                )
+            except ValueError:
+                caller = None
+
+            if caller is not None:
                 line: int | None = caller.f_lineno
                 file: str | None = caller.f_code.co_filename
-            except ValueError:
+            else:
                 line = None
                 file = None
 
@@ -500,12 +545,16 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
             # identifies it, for a from-import by the names in its
             # fromlist, and it counts as already lazy in the report.
             # The check must happen before the real import runs: native
-            # removes the pending entry once the module is loaded.
+            # removes the pending entry once the module is loaded. An
+            # eager import statement for a name another module has
+            # pending is pending too, and is told apart by the
+            # instruction its frame is at.
 
             native_lazy = (
                 level == 0
                 and has_native_lazy_imports()
                 and is_native_pending(name, fromlist)
+                and not (caller is not None and is_import_statement(caller))
             )
 
             stack.append((edge_id, child_time))
@@ -538,20 +587,41 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
                     with lock:
                         recorder.deferred_edges[record] = edge_id
 
+                added = len(sys.modules) - before
+
                 if stack:
                     stack[-1][1][0] += elapsed
                     stack[-1][1][1] += 1.0
+                    stack[-1][1][2] += added
 
                 importer = _importer_name(globals)
-                loaded = len(sys.modules) != before
+                loaded = added != 0
+
+                # An import made by an extension module as it loads
+                # arrives with the import system's globals, those of the
+                # topmost Python frame. It is credited to the extension,
+                # and has no statement, so no file or line.
+
+                extension = (
+                    _extension_loading(caller)
+                    if importer in _IMPORT_SYSTEM and caller is not None
+                    else None
+                )
+
+                if extension is not None:
+                    importer = extension
+                    line = None
+                    file = None
 
                 # A relative import is recorded by the absolute module
                 # it names, with the statement as written kept beside
                 # it, and a from-import also by the submodules its
-                # fromlist names. already_lazy is still checked against
-                # the name as passed, as the shim checks it, so a
-                # relative import is never marked lazy by a declaration
-                # of the absolute name: the shim would not defer it.
+                # fromlist names. declared_lazy is still checked
+                # against the name as passed, as the shim checks it, so a
+                # relative import is never marked declared by a
+                # declaration of the absolute name: the shim would not
+                # defer it. already_lazy is what this run deferred, by
+                # the shim or natively.
 
                 imported = _resolve_name(name, globals, level) if level > 0 else name
                 written = "." * level + name if level > 0 else name
@@ -572,15 +642,18 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
                     cum_ms=elapsed,
                     self_ms=elapsed - child_time[0],
                     native_lazy=native_lazy,
-                    already_lazy=native_lazy
+                    already_lazy=native_lazy or record is not None,
+                    declared_lazy=native_lazy
                     or (
                         is_candidate(name, globals, config)
-                        if globals is not None
+                        if globals is not None and extension is None
                         else False
                     ),
                     deferred=record is not None,
                     relative=level > 0,
                     labels=labels,
+                    self_modules=int(added - child_time[2]),
+                    extension_module=extension is not None,
                 )
 
                 # An already-loaded hit with nothing nested beneath it
@@ -622,6 +695,50 @@ def _make_hook(recorder: Recorder) -> ImportFunction:
             local.reentrant = False
 
     return _profiling_import
+
+
+def _extension_loading(frame: types.FrameType) -> str | None:
+    """The extension module whose loading made an import, or None.
+
+    An extension module imports through the C API, which calls
+    __import__ with the globals of the topmost Python frame. While an
+    extension loads, that frame is the import system's own
+    _call_with_frames_removed, calling the _imp function that creates
+    or executes the module: with its spec for create_dynamic and
+    create_builtin, with the module for exec_dynamic and exec_builtin.
+    That names the extension exactly, which the enclosing import call
+    cannot always do: `import a.b.c` may load any of three modules,
+    and a C import the import system makes for itself, such as the
+    `_io` that reading a source file imports, comes from a frame
+    loading a source module, and is not an extension's. Never raises.
+    """
+
+    try:
+        if frame.f_code.co_name != "_call_with_frames_removed":
+            return None
+
+        frame_locals = frame.f_locals
+        function = frame_locals.get("f")
+        args = frame_locals.get("args")
+
+        if getattr(function, "__name__", None) not in _EXTENSION_LOADERS:
+            return None
+
+        if not isinstance(args, tuple) or not args:
+            return None
+
+        target = args[0]
+
+        name: object = (
+            target.__name__
+            if isinstance(target, types.ModuleType)
+            else getattr(target, "name", None)
+        )
+
+        return name if isinstance(name, str) else None
+
+    except Exception:
+        return None
 
 
 def _resolve_name(name: str, globals: Mapping[str, object] | None, level: int) -> str:

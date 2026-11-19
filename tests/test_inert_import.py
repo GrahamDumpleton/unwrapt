@@ -29,6 +29,7 @@ def test_import_does_not_install_the_hook() -> None:
             "import_unchanged": builtins.__import__ is before,
             "wrapt_imported": "wrapt" in sys.modules,
             "config_imported": "unwrapt._config" in sys.modules,
+            "report_imported": "unwrapt._report" in sys.modules,
             "installed": unwrapt.is_installed(),
             "version": unwrapt.__version__,
         }
@@ -45,6 +46,10 @@ def test_import_does_not_install_the_hook() -> None:
     # only on first access.
 
     assert facts["config_imported"] is False
+
+    # Nor does the report and its analysis, the source check included.
+
+    assert facts["report_imported"] is False
 
 
 def test_import_bootstrap_does_not_install_the_hook() -> None:

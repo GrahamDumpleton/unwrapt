@@ -31,15 +31,22 @@ import re
 import sys
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
-from typing import Any, Literal, TypedDict
+from typing import TYPE_CHECKING, Any, Literal, TypedDict
 
 from unwrapt import __version__
 from unwrapt._config import DEFAULT_ROWS, ProfileOptions
 
+# The source check imports ast when it first runs, never with this
+# module: the recorder imports this module when it installs, and must
+# not load modules the profiled program would otherwise load itself.
+
+if TYPE_CHECKING:
+    import ast
+
 # The version of the dictionary form. Bumped whenever a field changes
 # incompatibly.
 
-SCHEMA = 3
+SCHEMA = 4
 
 # How many heavy modules chains() and the summary's best cut look at.
 _CHAIN_LIMIT = 8
@@ -64,8 +71,10 @@ class Defer(TypedDict):
     native is whether native lazy imports (Python 3.15 and later) could
     defer the statement's form. unwrapt is whether the shim would defer
     this call if the import were listed, by the shim's own rules, and
-    reason is the first of those rules it fails: function-level,
-    class-level, relative, from-import, dotted-as or already-loaded.
+    reason is the first of those rules it fails: extension-module,
+    function-level, class-level, relative, from-import, dotted-as or
+    already-loaded. extension-module is an import an extension module
+    made as it loaded, which neither route can defer.
     """
 
     native: bool
@@ -91,7 +100,9 @@ class EdgeRecord(TypedDict):
     count: int
     cum_ms: float
     self_ms: float
+    self_modules: int
     defer: Defer
+    declared_lazy: bool
     already_lazy: bool
     native_lazy: bool
     deferred: bool
@@ -129,6 +140,7 @@ class Summary(TypedDict):
 
     total_import_ms: float
     modules_loaded: int
+    packages_loaded: int
     edge_count: int
     import_calls: int
     estimated_saving_ms: float
@@ -162,7 +174,11 @@ class Candidate(TypedDict):
     saving_ms is what deferring this one import alone would save: its
     cumulative time, less the cost of any module it loads that another
     eager importer would load anyway, and zero when the shim cannot
-    defer it, it is already lazy, or its own module is shared.
+    defer it, this run already deferred it, its importer uses it at
+    load, or its own module is shared. declared_lazy marks an import
+    declared deferred, which this run may have loaded eagerly anyway,
+    with deferral off; used_at_load one whose importer's source uses
+    the name it binds at module level, so deferring it saves nothing.
     """
 
     edge: int
@@ -174,7 +190,9 @@ class Candidate(TypedDict):
     native: bool
     unwrapt: bool
     reason: str | None
+    declared_lazy: bool
     already_lazy: bool
+    used_at_load: bool
     shared: list[str]
     saving_ms: float
 
@@ -211,7 +229,11 @@ class DeferredUnused(TypedDict):
 
 
 class DeferredUsed(TypedDict):
-    """A deferred import the profiled run used, and so loaded anyway."""
+    """A deferred import the profiled run used, and so loaded anyway.
+
+    used_at_load marks one used while its importer was still loading,
+    so deferring it saved nothing.
+    """
 
     edge: int | None
     resolution: int
@@ -221,6 +243,7 @@ class DeferredUsed(TypedDict):
     line: int | None
     load_ms: float
     loaded: bool
+    used_at_load: bool
 
 
 # The recorder's in-memory form.
@@ -234,18 +257,23 @@ class Edge:
     fromlist, or "resolve" for a deferred import being resolved at
     first use, in a run with deferral on; level_name is "module",
     "function" or "class" for where the statement sits, and relative
-    whether the import was relative. already_lazy marks an import that
-    is already declared deferred, by __lazy_modules__, by the external
-    configuration, or natively on Python 3.15; native_lazy is the
-    Python 3.15 case, an import recorded at native reification rather
-    than at its statement. deferred marks an import the shim below the
-    recorder handed back as a lazy proxy, in a run with deferral on. A
+    whether the import was relative. declared_lazy marks an import
+    declared deferred, by __lazy_modules__ below Python 3.15, by the
+    external configuration, or natively on Python 3.15, whether or not
+    this run deferred it; already_lazy one this run did defer, by the
+    shim or natively. native_lazy is the Python 3.15 case, an import
+    recorded at native reification rather than at its statement.
+    deferred marks an import the shim below the recorder handed back
+    as a lazy proxy, in a run with deferral on. A
     resolve edge carries in resolves the id of the deferred edge it
     resolves, when the recorder saw that deferral, and in used_in the
     module that used the proxy first; its line is the line of that
     first use. labels is the index of the label set in force, and count
     the number of already-loaded hits a folded edge stands for, with
-    their times summed.
+    their times summed. self_modules is how many modules the call added
+    to sys.modules, those of nested calls excluded. extension_module
+    marks an import an extension module made as it loaded, credited to
+    the extension, with no file or line.
 
     imported is the absolute name of the module the call named, with a
     relative import resolved against the importer's package, and
@@ -276,6 +304,9 @@ class Edge:
     count: int = 1
     written: str | None = None
     submodules: tuple[str, ...] = ()
+    declared_lazy: bool = False
+    self_modules: int = 0
+    extension_module: bool = False
 
 
 class Report:
@@ -308,6 +339,9 @@ class Report:
         self.filters = filters
         self.edges = edges
         self._graph: _Graph | None = None
+        self._plans: dict[tuple[float, tuple[str, ...] | None], _Plan] = {}
+        self._load_uses: dict[int, int | None] = {}
+        self._sources: dict[str, _Source | None] = {}
 
     @classmethod
     def from_dict(cls, data: Mapping[str, Any]) -> "Report":
@@ -519,28 +553,39 @@ def load_report(path: str) -> Report:
 # The analysis.
 
 
-def summary(report: Report) -> Summary:
+def summary(
+    report: Report,
+    *,
+    min_ms: float | None = None,
+    packages: Sequence[str] | None = None,
+) -> Summary:
     """The headline figures: the totals, and the deferral plan's saving.
 
     The total is the sum of the outermost import calls, so a nest
-    counts once. The estimated saving is for deferring every
-    module-level import both routes can defer, net of the cost that
-    would only move to another eager importer, and the best cut is the
-    single link that removes the most.
+    counts once. modules_loaded is the number of modules the run added
+    to sys.modules, and packages_loaded the number of top-level
+    packages they belong to. The estimated saving is for deferring
+    every module-level import both routes can defer, net of the cost
+    that would only move to another eager importer, and the best cut
+    is the single link that removes the most. An import declared lazy
+    that this run loaded eagerly is in the plan; one whose importer
+    uses it at load, among the candidates min_ms and packages select
+    (the report's filters by default), is not.
     """
 
-    plan = _Plan(report)
+    plan = _plan(report, min_ms, packages)
 
     return Summary(
         total_import_ms=sum(
             edge["cum_ms"] for edge in report.edges if edge["parent_id"] is None
         ),
-        modules_loaded=len(heavy_modules(report)),
+        modules_loaded=max(sum(edge["self_modules"] for edge in report.edges), 0),
+        packages_loaded=len(heavy_modules(report)),
         edge_count=len(report.edges),
         import_calls=sum(edge["count"] for edge in report.edges),
         estimated_saving_ms=plan.estimated_saving(),
         estimate_note=_ESTIMATE_NOTE,
-        best_cut=_best_cut(report, chains(report)),
+        best_cut=_best_cut(report, _chains(report, _CHAIN_LIMIT, plan)),
     )
 
 
@@ -610,9 +655,16 @@ def candidates(
     cumulative time, with what deferring each alone would save.
 
     No row is dropped because a route cannot defer it: the native and
-    unwrapt columns say which can. min_ms and packages default to the
-    report's filters; packages keeps only importers under the named
-    top-level packages.
+    unwrapt columns say which can. An import an extension module made
+    as it loaded is never a row, since there is no statement to defer.
+    min_ms and packages default to the report's filters; packages keeps
+    only importers under the named top-level packages.
+
+    Each row a route could defer, and that this run did not, is checked
+    against its importer's source: when the module-level code uses the
+    name the import binds, the row is marked used_at_load and saves
+    nothing. Only the rows returned are checked, and a source that
+    cannot be read or parsed leaves its row as it is.
     """
 
     if min_ms is None:
@@ -631,10 +683,13 @@ def candidates(
             edge["level"] != "module"
             or edge["kind"] == "resolve"
             or not edge["loaded"]
+            or edge["defer"]["reason"] == "extension-module"
             or edge["cum_ms"] < min_ms
             or not _under_packages(edge["importer"], packages)
         ):
             continue
+
+        used_at_load = _use_at_load(report, edge) is not None
 
         rows.append(
             Candidate(
@@ -647,9 +702,11 @@ def candidates(
                 native=edge["defer"]["native"],
                 unwrapt=edge["defer"]["unwrapt"],
                 reason=edge["defer"]["reason"],
+                declared_lazy=edge["declared_lazy"],
                 already_lazy=edge["already_lazy"],
+                used_at_load=used_at_load,
                 shared=_shared(report, edge),
-                saving_ms=_single_saving(graph, edge, eager),
+                saving_ms=0.0 if used_at_load else _single_saving(graph, edge, eager),
             )
         )
 
@@ -664,11 +721,18 @@ def chain(report: Report, module: str) -> Chain | None:
     module is matched by top-level package, against the first edge that
     loaded it. A chain is the list of places the load could be cut. Its
     best cut is the outermost link that both routes can defer, that is
-    not already lazy, and whose deferral is not undone by an eager
-    importer of a module in its subtree. Deferring an outer link
-    removes the whole subtree beneath it, so the outermost safe link
-    saves the most. Returns None when nothing loaded the module.
+    neither already lazy nor declared lazy, that its importer does not
+    use at load, and whose deferral is not undone by an eager importer
+    of a module in its subtree. Deferring an outer link removes the
+    whole subtree beneath it, so the outermost safe link saves the
+    most. Returns None when nothing loaded the module.
     """
+
+    return _chain(report, module, _plan(report, None, None))
+
+
+def _chain(report: Report, module: str, plan: "_Plan") -> Chain | None:
+    """The chain of import calls that loaded module, under a plan."""
 
     graph = report.graph()
     target = top_level(module)
@@ -702,17 +766,23 @@ def chain(report: Report, module: str) -> Chain | None:
         module=target,
         self_ms=self_ms,
         links=links,
-        best_cut=_Plan(report).best_cut(links),
+        best_cut=plan.best_cut(links),
     )
 
 
 def chains(report: Report, limit: int = _CHAIN_LIMIT) -> list[Chain]:
     """The chains of the heaviest modules, heaviest first."""
 
+    return _chains(report, limit, _plan(report, None, None))
+
+
+def _chains(report: Report, limit: int, plan: "_Plan") -> list[Chain]:
+    """The chains of the heaviest modules, under a plan."""
+
     result: list[Chain] = []
 
     for heavy in heavy_modules(report)[:limit]:
-        found = chain(report, heavy["module"])
+        found = _chain(report, heavy["module"], plan)
 
         if found is not None:
             result.append(found)
@@ -746,8 +816,9 @@ def by_importer(report: Report) -> list[ByImporter]:
 
     These are the files to edit first: the sum counts only edges whose
     statement sits in the module itself, never the imports made by the
-    modules it goes on to load, and never the resolve of an import that
-    is already deferred.
+    modules it goes on to load, never the resolve of an import that is
+    already deferred, and never the imports an extension module makes
+    as it loads, which have no statement to edit.
     """
 
     by: dict[str, float] = {}
@@ -758,6 +829,7 @@ def by_importer(report: Report) -> list[ByImporter]:
             and edge["level"] == "module"
             and edge["kind"] != "resolve"
             and edge["importer"] is not None
+            and edge["defer"]["reason"] != "extension-module"
         ):
             by[edge["importer"]] = by.get(edge["importer"], 0.0) + edge["cum_ms"]
 
@@ -781,10 +853,30 @@ def deferred_unused(report: Report) -> list[DeferredUnused]:
 
 def deferred_used(report: Report) -> list[DeferredUsed]:
     """The deferred imports the run used anyway, costliest first, with
-    where each was first used and what its load cost."""
+    where each was first used and what its load cost.
+
+    used_at_load marks a resolve made while the importer's own load was
+    still running: the resolve lies inside the import call that loaded
+    the importer, so deferring it saved nothing, and the declaration
+    can go. That call is the one that paid for the importer, or, when
+    no edge names it, the call the deferred statement ran inside.
+    """
+
+    graph = report.graph()
+    payers = _payers(report)
 
     resolves = [edge for edge in report.edges if edge["kind"] == "resolve"]
     resolves.sort(key=lambda edge: (-edge["cum_ms"], edge["id"]))
+
+    def at_load(edge: EdgeRecord) -> bool:
+        importer = edge["importer"]
+        loading = payers.get(importer) if importer is not None else None
+
+        if loading is None:
+            deferred = report.edge(edge["resolves"])
+            loading = deferred["parent_id"] if deferred is not None else None
+
+        return loading is not None and edge["id"] in graph.descendants(loading)
 
     return [
         DeferredUsed(
@@ -796,6 +888,7 @@ def deferred_used(report: Report) -> list[DeferredUsed]:
             line=edge["line"],
             load_ms=edge["cum_ms"],
             loaded=edge["loaded"],
+            used_at_load=at_load(edge),
         )
         for edge in resolves
     ]
@@ -821,7 +914,11 @@ def compare_reports(before: Report, after: Report) -> str:
     old_modules = _loaded_modules(before)
     new_modules = _loaded_modules(after)
 
-    lines.append(f"Modules loaded: {len(old_modules)} -> {len(new_modules)}")
+    old_count = sum(edge["self_modules"] for edge in before.edges)
+    new_count = sum(edge["self_modules"] for edge in after.edges)
+
+    lines.append(f"Modules loaded: {old_count} -> {new_count}")
+    lines.append(f"Packages loaded: {len(old_modules)} -> {len(new_modules)}")
 
     newly = sorted(new_modules - old_modules)
     gone = sorted(old_modules - new_modules)
@@ -976,7 +1073,9 @@ def _edge_record(edge: Edge, resolution: int | None) -> EdgeRecord:
         count=edge.count,
         cum_ms=edge.cum_ms,
         self_ms=edge.self_ms,
+        self_modules=edge.self_modules,
         defer=_defer(edge),
+        declared_lazy=edge.declared_lazy,
         already_lazy=edge.already_lazy,
         native_lazy=edge.native_lazy,
         deferred=edge.deferred,
@@ -998,8 +1097,12 @@ def _defer(edge: Edge) -> Defer:
     is not a property of the code: the two routes are reported
     separately, and no edge is ever dropped because one cannot defer
     it. A resolve edge is a statement that was deferred, and a
-    deferred edge one the shim did defer.
+    deferred edge one the shim did defer. An import an extension module
+    made as it loaded has no statement to defer, by either route.
     """
+
+    if edge.extension_module:
+        return Defer(native=False, unwrapt=False, reason="extension-module")
 
     if edge.level_name == "function":
         return Defer(native=False, unwrapt=False, reason="function-level")
@@ -1060,20 +1163,61 @@ def _both_routes(edge: EdgeRecord) -> bool:
     return (defer["native"] and defer["unwrapt"]) or defer["reason"] == "already-loaded"
 
 
+def _lazy(edge: EdgeRecord) -> bool:
+    """Whether an import is lazy, or decided lazy: this run deferred it,
+    or it is declared lazy, which a run with deferral on would honour.
+    The eager profile for finding candidates runs with deferral off, so
+    there a declared import is one already decided."""
+
+    return edge["already_lazy"] or edge["declared_lazy"]
+
+
+def _plan(
+    report: Report, min_ms: float | None, packages: Sequence[str] | None
+) -> "_Plan":
+    """The deferral plan, with the candidates min_ms and packages select
+    checked for use at load; the report's filters by default. Built
+    once per filter setting."""
+
+    if min_ms is None:
+        min_ms = report.filters["min_ms"]
+
+    if packages is None and report.filters["packages"] is not None:
+        packages = report.filters["packages"]
+
+    key = (min_ms, tuple(packages) if packages is not None else None)
+    plan = report._plans.get(key)
+
+    if plan is None:
+        used = {
+            row["edge"]
+            for row in candidates(report, min_ms=min_ms, packages=packages)
+            if row["used_at_load"]
+        }
+
+        plan = report._plans[key] = _Plan(report, used)
+
+    return plan
+
+
 class _Plan:
     """The deferral plan behind the estimated saving and the best cuts.
 
-    Every loaded module-level import that both routes can defer and
-    that is not already lazy is a planned deferral, except that an edge
-    nested below another planned deferral is not kept: deferring the
-    outer one already removes it, and adding its time would double
-    count. The eager importers are the module-level imports outside the
-    plan that are not already lazy and that a route cannot defer: they
-    would load their modules anyway.
+    Every loaded module-level import that both routes can defer, that
+    this run did not already defer, and that its importer is not known
+    to use at load, is a planned deferral: an import declared lazy that
+    loaded eagerly, with deferral off, is planned too, since turning
+    deferral on is what would save it. An edge nested below another
+    planned deferral is not kept: deferring the outer one already
+    removes it, and adding its time would double count. The eager
+    importers are the module-level imports outside the plan that are
+    used at load, or that are neither lazy nor declared lazy and that a
+    route cannot defer: they would load their modules anyway.
     """
 
-    def __init__(self, report: Report) -> None:
+    def __init__(self, report: Report, used_at_load: set[int]) -> None:
         self.graph = report.graph()
+        self.used_at_load = used_at_load
 
         planned = [
             edge
@@ -1082,6 +1226,7 @@ class _Plan:
             and edge["loaded"]
             and edge["level"] == "module"
             and not edge["already_lazy"]
+            and edge["id"] not in used_at_load
         ]
 
         inside: set[int] = set()
@@ -1091,6 +1236,7 @@ class _Plan:
 
         self.kept = [edge for edge in planned if edge["id"] not in inside]
         self.kept_ids = {edge["id"] for edge in self.kept}
+        self.declared = {edge["id"] for edge in self.kept if edge["declared_lazy"]}
 
         self.inside_kept: set[int] = set()
 
@@ -1104,8 +1250,10 @@ class _Plan:
                 edge["id"] not in self.inside_kept
                 and edge["id"] not in self.kept_ids
                 and edge["level"] == "module"
-                and not edge["already_lazy"]
-                and not _both_routes(edge)
+                and (
+                    edge["id"] in used_at_load
+                    or (not _lazy(edge) and not _both_routes(edge))
+                )
             ):
                 self.eager.add(top_level(edge["imported"]))
 
@@ -1142,11 +1290,12 @@ class _Plan:
 
         A link is safe when no module loaded in its subtree has an eager
         importer outside the plan: otherwise deferring the link only
-        moves that module's cost.
+        moves that module's cost. A link already declared lazy is not
+        offered: it is decided, and deferral on is what saves it.
         """
 
         for link_id in links:
-            if link_id not in self.kept_ids:
+            if link_id not in self.kept_ids or link_id in self.declared:
                 continue
 
             undone = any(
@@ -1181,7 +1330,7 @@ def _best_cut(report: Report, found: Sequence[Chain]) -> int | None:
 
 def _eager_importers(report: Report) -> dict[str, set[int]]:
     """For each top-level package, the module-level edges importing it
-    that are not already lazy, loaded or cache hit."""
+    that are neither lazy nor declared lazy, loaded or cache hit."""
 
     eager: dict[str, set[int]] = {}
 
@@ -1189,7 +1338,7 @@ def _eager_importers(report: Report) -> dict[str, set[int]]:
         if (
             edge["level"] == "module"
             and edge["kind"] != "resolve"
-            and not edge["already_lazy"]
+            and not _lazy(edge)
             and not edge["deferred"]
         ):
             eager.setdefault(top_level(edge["imported"]), set()).add(edge["id"])
@@ -1223,6 +1372,273 @@ def _single_saving(
             moved[module] = max(moved.get(module, 0.0), loaded["cum_ms"])
 
     return max(edge["cum_ms"] - sum(moved.values()), 0.0)
+
+
+# The source check: whether an importer's module-level code uses the
+# name an import binds, which resolves a deferred import while the
+# importer is still loading, so deferring it would save nothing.
+
+
+class _Source:
+    """One importing module's source, as the check reads it: its import
+    statements, by line, and the lines on which its load-time code
+    loads each name."""
+
+    __slots__ = ("imports", "uses")
+
+    def __init__(
+        self,
+        imports: "list[ast.Import | ast.ImportFrom]",
+        uses: dict[str, list[int]],
+    ) -> None:
+        self.imports = imports
+        self.uses = uses
+
+
+def _use_at_load(report: Report, edge: EdgeRecord) -> int | None:
+    """The first line on which the importer's load-time code uses the
+    name the edge's statement binds, or None. Never raises.
+
+    Checked only for a statement a route could defer and that this run
+    did not, with a file and line to read. Load-time code is the module
+    body outside function bodies: class bodies, decorators, default
+    arguments and, where the profiled Python evaluates them at
+    definition, annotations all count. An `if TYPE_CHECKING:` body, and
+    an `if __name__ == "__main__":` body in a module that is not the
+    main one, never run at load and do not. A use the source does not
+    spell out, through getattr() or globals(), is not seen; the deferral
+    sections see it once the deferral is tried. A source that cannot be
+    read or parsed, or a statement not found in it, gives None.
+    """
+
+    edge_id = edge["id"]
+
+    if edge_id in report._load_uses:
+        return report._load_uses[edge_id]
+
+    result: int | None = None
+
+    if (
+        (edge["defer"]["native"] or edge["defer"]["unwrapt"])
+        and not edge["already_lazy"]
+        and edge["file"] is not None
+        and edge["line"] is not None
+    ):
+        try:
+            source = _source(report, edge["file"], edge["importer"] == "__main__")
+
+            if source is not None:
+                result = _first_use(source, edge, edge["line"])
+        except Exception:
+            result = None
+
+    report._load_uses[edge_id] = result
+
+    return result
+
+
+def _source(report: Report, file: str, main: bool) -> _Source | None:
+    """The parsed source of an importing module, read once per report."""
+
+    key = f"{int(main)}:{file}"
+
+    if key in report._sources:
+        return report._sources[key]
+
+    import ast
+
+    result: _Source | None = None
+    lines = linecache.getlines(file)
+
+    if lines:
+        try:
+            tree = ast.parse("".join(lines), filename=file)
+        except (SyntaxError, ValueError):
+            tree = None
+
+        if tree is not None:
+            imports = [
+                node
+                for node in ast.walk(tree)
+                if isinstance(node, (ast.Import, ast.ImportFrom))
+            ]
+
+            annotations = _annotations_evaluated(report, tree)
+            uses = _load_time_uses(tree, annotations, main)
+
+            result = _Source(imports, uses)
+
+    report._sources[key] = result
+
+    return result
+
+
+def _annotations_evaluated(report: Report, tree: "ast.Module") -> bool:
+    """Whether the profiled Python evaluates annotations at definition:
+    below Python 3.14, without `from __future__ import annotations`."""
+
+    import ast
+
+    match = re.match(r"(\d+)\.(\d+)", report.python)
+
+    if match is not None and (int(match[1]), int(match[2])) >= (3, 14):
+        return False
+
+    for node in tree.body:
+        if (
+            isinstance(node, ast.ImportFrom)
+            and node.module == "__future__"
+            and any(alias.name == "annotations" for alias in node.names)
+        ):
+            return False
+
+    return True
+
+
+def _load_time_uses(
+    tree: "ast.Module", annotations: bool, main: bool
+) -> dict[str, list[int]]:
+    """The lines on which the code that runs at load loads each name."""
+
+    import ast
+
+    uses: dict[str, list[int]] = {}
+    pending: list[ast.AST] = list(tree.body)
+    type_alias = getattr(ast, "TypeAlias", None)
+
+    while pending:
+        node = pending.pop()
+
+        # A definition runs its decorators, defaults and, when they
+        # are evaluated, its annotations; its body runs when called.
+
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.Lambda)):
+            arguments = node.args
+
+            pending.extend(arguments.defaults)
+            pending.extend(value for value in arguments.kw_defaults if value)
+
+            if not isinstance(node, ast.Lambda):
+                pending.extend(node.decorator_list)
+
+                if annotations:
+                    every = [
+                        *arguments.posonlyargs,
+                        *arguments.args,
+                        *arguments.kwonlyargs,
+                        *(arg for arg in (arguments.vararg, arguments.kwarg) if arg),
+                    ]
+
+                    pending.extend(arg.annotation for arg in every if arg.annotation)
+
+                    if node.returns is not None:
+                        pending.append(node.returns)
+
+            continue
+
+        if isinstance(node, ast.AnnAssign) and not annotations:
+            pending.append(node.target)
+
+            if node.value is not None:
+                pending.append(node.value)
+
+            continue
+
+        if type_alias is not None and isinstance(node, type_alias):
+            continue
+
+        if isinstance(node, ast.If) and (
+            _is_type_checking(node.test) or (not main and _is_main_check(node.test))
+        ):
+            pending.extend(node.orelse)
+
+            continue
+
+        if isinstance(node, ast.Name) and isinstance(node.ctx, ast.Load):
+            uses.setdefault(node.id, []).append(node.lineno)
+
+            continue
+
+        pending.extend(ast.iter_child_nodes(node))
+
+    return uses
+
+
+def _is_type_checking(test: "ast.expr") -> bool:
+    """Whether an if statement's test is TYPE_CHECKING."""
+
+    import ast
+
+    if isinstance(test, ast.Name):
+        return test.id == "TYPE_CHECKING"
+
+    return isinstance(test, ast.Attribute) and test.attr == "TYPE_CHECKING"
+
+
+def _is_main_check(test: "ast.expr") -> bool:
+    """Whether an if statement's test is __name__ == "__main__"."""
+
+    import ast
+
+    if not (
+        isinstance(test, ast.Compare)
+        and len(test.ops) == 1
+        and isinstance(test.ops[0], ast.Eq)
+    ):
+        return False
+
+    sides = [test.left, test.comparators[0]]
+
+    return any(
+        isinstance(side, ast.Name) and side.id == "__name__" for side in sides
+    ) and any(
+        isinstance(side, ast.Constant) and side.value == "__main__" for side in sides
+    )
+
+
+def _first_use(source: _Source, edge: EdgeRecord, line: int) -> int | None:
+    """The first load-time use, at or after the statement, of a name the
+    edge's statement binds."""
+
+    import ast
+
+    bound: list[str] = []
+
+    for node in source.imports:
+        end = node.end_lineno if node.end_lineno is not None else node.lineno
+
+        if not node.lineno <= line <= end:
+            continue
+
+        if isinstance(node, ast.Import) and edge["kind"] == "import":
+            aliases = [alias for alias in node.names if alias.name == edge["written"]]
+
+            if not aliases and len(node.names) == 1:
+                aliases = list(node.names)
+
+            bound.extend(
+                alias.asname or alias.name.partition(".")[0] for alias in aliases
+            )
+
+        elif isinstance(node, ast.ImportFrom) and edge["kind"] == "from":
+            written = "." * node.level + (node.module or "")
+
+            if written == edge["written"]:
+                bound.extend(
+                    alias.asname or alias.name
+                    for alias in node.names
+                    if alias.name != "*"
+                )
+
+        if bound:
+            first = node.lineno
+            break
+    else:
+        return None
+
+    found = [use for name in bound for use in source.uses.get(name, ()) if use >= first]
+
+    return min(found) if found else None
 
 
 def _named(edge: EdgeRecord) -> list[str]:
@@ -1278,9 +1694,10 @@ def _payers(report: Report) -> dict[str, int]:
 
 
 def _shared(report: Report, edge: EdgeRecord) -> list[str]:
-    """The other modules that also import this edge's module and are not
-    already lazy, loaded or cache hit. A shared module only stays
-    unloaded if every eager importer of it is deferred.
+    """The other modules that also import this edge's module and are
+    neither lazy nor declared lazy, loaded or cache hit. A shared
+    module only stays unloaded if every eager importer of it is
+    deferred.
 
     The same module means the same module name, so `import xml.dom`
     and `from xml.dom import Node` count as importers of the same
@@ -1299,7 +1716,7 @@ def _shared(report: Report, edge: EdgeRecord) -> list[str]:
             and candidate["importer"] != edge["importer"]
             and candidate["level"] == "module"
             and candidate["kind"] != "resolve"
-            and not candidate["already_lazy"]
+            and not _lazy(candidate)
             and not targets.isdisjoint(_targets(candidate))
         ):
             others.add(candidate["importer"])
@@ -1443,19 +1860,21 @@ def _loaded_modules(report: Report) -> set[str]:
 
 
 _LIMITS = [
-    "The profile cannot see import-time use of the imported name by the"
-    " importing module: class bases, decorators, default arguments,"
-    " annotations without `from __future__ import annotations` and"
-    " module level calls all force resolution at import time, and none"
-    " of them show here.",
+    "Import-time use of the imported name by the importing module is"
+    " checked in its source, for the candidates listed: module-level"
+    " code, class bodies, decorators, default arguments and evaluated"
+    " annotations all force resolution at import time. A use the source"
+    " does not spell out, through getattr() or globals(), is not seen"
+    " until the deferral is tried, when the deferral sections show it.",
     "A `try/except ImportError` around the import is invisible to the"
     " profile: deferring a guarded optional dependency moves its"
     " ImportError to first use.",
     "The report describes the workload that was profiled, not every"
     " workload: an import cheap on one path may be unavoidable on"
     " another.",
-    "Imports made through importlib.import_module and the C import API"
-    " do not pass through the hook as edges of their own: their time is"
+    "Imports made through importlib.import_module, or by C code that"
+    " calls the import machinery without going through __import__, do"
+    " not pass through the hook as edges of their own: their time is"
     " included in the enclosing cumulative figure but gets no row. A"
     " submodule a `from` import loads is named on that import's row and"
     " shares its figures, except those a `from x import *` brings in,"
@@ -1482,7 +1901,9 @@ def _render_text(
 
     rows = _rows(report.filters["rows"] if rows is None else rows)
 
-    headline = summary(report)
+    headline = summary(report, min_ms=min_ms, packages=packages)
+    plan = _plan(report, min_ms, packages)
+    rows_shown = candidates(report, min_ms=min_ms, packages=packages)
     lines: list[str] = []
 
     # Summary header.
@@ -1497,7 +1918,8 @@ def _render_text(
 
     lines.append(
         f"Summary: {_ms(headline['total_import_ms'])} ms total import time,"
-        f" {headline['modules_loaded']} modules loaded,"
+        f" {headline['modules_loaded']} modules loaded"
+        f" ({headline['packages_loaded']} packages),"
         f" {headline['edge_count']} edges ({headline['import_calls']} import calls)"
     )
     lines.append(
@@ -1514,6 +1936,28 @@ def _render_text(
             f" ({_ms(best['cum_ms'])} ms cumulative)"
         )
 
+    # Imports declared lazy that this run loaded eagerly: decided
+    # already, so not new candidates, but their cost is real, and it is
+    # in the estimated saving.
+
+    declared = [
+        row
+        for row in rows_shown
+        if row["declared_lazy"]
+        and not row["already_lazy"]
+        and row["native"]
+        and row["unwrapt"]
+        and not row["used_at_load"]
+    ]
+
+    if declared:
+        lines.append(
+            f"Declared lazy, loaded eagerly: {len(declared)} imports"
+            f" ({_ms(sum(row['cum_ms'] for row in declared))} ms cumulative),"
+            " counted in the estimated saving; turning deferral on is what"
+            " saves them"
+        )
+
     # Native lazy imports (Python 3.15) are recorded at first use, and
     # the reader needs to know which edges those are and what that
     # means for the figures.
@@ -1525,9 +1969,11 @@ def _render_text(
         lines.append(
             f"Warning: {reified} native lazy imports on Python 3.15"
             " were recorded at first use rather than at their import"
-            " statements. Their cost is real, and attributed to the"
-            " importing module, but the line is the site of first use"
-            " and the timing is the load cost wherever it landed. To"
+            " statements. Their cost is real, but it is attributed to the"
+            " module whose code first used each, which is not the"
+            " declaring module when another module reached the binding"
+            " through it, the line is the site of first use, and the"
+            " timing is the load cost wherever it landed. To"
             " measure an eager run, unset native lazy imports"
             " (PYTHON_LAZY_IMPORTS=normal) and profile again."
         )
@@ -1554,7 +2000,7 @@ def _render_text(
         ["cum ms", "self ms", "imported", "imported by", "3.15", "unwrapt", "notes"]
     ]
 
-    for row in candidates(report, min_ms=min_ms, packages=packages):
+    for row in rows_shown:
         edge = report.edge(row["edge"])
 
         assert edge is not None
@@ -1567,7 +2013,7 @@ def _render_text(
                 _who(edge),
                 _native_cell(edge),
                 _unwrapt_cell(edge),
-                _notes(edge, row["shared"]),
+                _notes(report, edge, row["shared"]),
             ]
         )
 
@@ -1584,6 +2030,8 @@ def _render_text(
     lines.append("      access on older Pythons.")
     lines.append("  (2) function level imports are already deferred until the")
     lines.append("      function runs, so there is nothing to decide.")
+    lines.append("  (3) an extension module made the import as it loaded, so")
+    lines.append("      there is no statement either route could defer.")
 
     # Heavy modules: the heaviest few, filtered as the candidates are,
     # with how many were left out. The chains below are theirs.
@@ -1640,7 +2088,7 @@ def _render_text(
     lines.append("Import chains: why each heavy module is loaded")
 
     for heavy in shown:
-        item = chain(report, heavy["module"])
+        item = _chain(report, heavy["module"], plan)
 
         if item is None:
             continue
@@ -1664,7 +2112,7 @@ def _render_text(
             if link["id"] == item["best_cut"]:
                 parts.append("<- best cut")
 
-            notes = _notes(link, _shared(report, link))
+            notes = _notes(report, link, _shared(report, link))
 
             if notes:
                 parts.append(notes)
@@ -1695,7 +2143,7 @@ def _render_deferrals(report: Report) -> list[str]:
     lines = [""]
     lines.append("Deferred but used anyway: loaded during the run, so not a saving")
 
-    table = [["load ms", "module", "deferred in", "first used in", "line"]]
+    table = [["load ms", "module", "deferred in", "first used in", "line", "notes"]]
 
     for entry in used:
         table.append(
@@ -1705,10 +2153,13 @@ def _render_deferrals(report: Report) -> list[str]:
                 _name(entry["importer"]),
                 _name(entry["used_in"]),
                 str(entry["line"]) if entry["line"] is not None else "",
+                "used at load, deferring saves nothing; remove the declaration"
+                if entry["used_at_load"]
+                else "",
             ]
         )
 
-    lines.extend(_table(table, [False, True, True, True, False]))
+    lines.extend(_table(table, [False, True, True, True, False, True]))
 
     lines.append("")
     lines.append("  (loaded) means something else had already loaded the module.")
@@ -1751,10 +2202,14 @@ def _name(module: str | None) -> str:
 
 
 def _native_cell(edge: EdgeRecord) -> str:
-    """The 3.15 column: deferrable, n/a for function level imports."""
+    """The 3.15 column: deferrable, n/a for function level imports, and
+    the footnote for an extension module's import."""
 
     if edge["level"] == "function":
         return "n/a (2)"
+
+    if edge["defer"]["reason"] == "extension-module":
+        return "no (3)"
 
     return "yes" if edge["defer"]["native"] else "no"
 
@@ -1766,16 +2221,32 @@ def _unwrapt_cell(edge: EdgeRecord) -> str:
     if edge["level"] == "function":
         return "n/a (2)"
 
+    if edge["defer"]["reason"] == "extension-module":
+        return "no (3)"
+
     return "yes" if edge["defer"]["unwrapt"] else "no (1)"
 
 
-def _notes(edge: EdgeRecord, shared: Sequence[str]) -> str:
-    """The notes column: shared importers and already lazy declarations."""
+def _notes(report: Report, edge: EdgeRecord, shared: Sequence[str]) -> str:
+    """The notes column: lazy declarations, use at load and shared
+    importers."""
 
     notes: list[str] = []
 
     if edge["already_lazy"]:
         notes.append("already lazy")
+    elif edge["declared_lazy"]:
+        why = (
+            "deferral is off in this run"
+            if edge["defer"]["unwrapt"]
+            else "unwrapt cannot defer this form"
+        )
+        notes.append(f"declared lazy, loaded eagerly: {why}")
+
+    use = report._load_uses.get(edge["id"])
+
+    if use is not None:
+        notes.append(f"used at load (line {use}), deferring saves nothing")
 
     if shared:
         names = ", ".join(shared)

@@ -53,6 +53,9 @@ def edge(
     count: int = 1,
     written: str | None = None,
     submodules: tuple[str, ...] = (),
+    declared_lazy: bool = False,
+    self_modules: int = 0,
+    extension_module: bool = False,
 ) -> Edge:
     return Edge(
         id=edge_id,
@@ -76,6 +79,9 @@ def edge(
         count=count,
         written=written,
         submodules=submodules,
+        declared_lazy=declared_lazy,
+        self_modules=self_modules,
+        extension_module=extension_module,
     )
 
 
@@ -94,7 +100,7 @@ def test_to_dict_is_the_versioned_schema() -> None:
 
     data = report.to_dict()
 
-    assert data["schema"] == SCHEMA == Report.SCHEMA == 3
+    assert data["schema"] == SCHEMA == Report.SCHEMA == 4
     assert data["labels"] == {
         "app": "shop",
         "release": "r3",
@@ -129,7 +135,9 @@ def test_to_dict_is_the_versioned_schema() -> None:
         "count": 1,
         "cum_ms": 10.0,
         "self_ms": 10.0,
+        "self_modules": 0,
         "defer": {"native": True, "unwrapt": True, "reason": None},
+        "declared_lazy": False,
         "already_lazy": False,
         "native_lazy": False,
         "deferred": False,
@@ -220,6 +228,7 @@ def test_defer_reasons(tmp_path: Path) -> None:
         edge(6, "csv", "app", loaded=False),
         edge(7, "plistlib", "app", loaded=False, deferred=True),
         edge(8, "plistlib", "app", kind="resolve", resolves=7),
+        edge(9, "numbers", "_decimal", extension_module=True),
     )
 
     defer = {e["id"]: e["defer"] for e in report.edges}
@@ -233,6 +242,11 @@ def test_defer_reasons(tmp_path: Path) -> None:
     assert defer[6] == {"native": False, "unwrapt": False, "reason": "already-loaded"}
     assert defer[7] == {"native": True, "unwrapt": True, "reason": None}
     assert defer[8] == {"native": True, "unwrapt": True, "reason": None}
+    assert defer[9] == {
+        "native": False,
+        "unwrapt": False,
+        "reason": "extension-module",
+    }
 
 
 def test_deferred_edge_links_to_its_resolution() -> None:
@@ -269,6 +283,7 @@ def test_deferred_edge_links_to_its_resolution() -> None:
             "line": 12,
             "load_ms": 4.0,
             "loaded": True,
+            "used_at_load": False,
         }
     ]
 
@@ -864,3 +879,285 @@ def test_compare_reports_no_longer_loaded() -> None:
 
     assert "No longer loaded: csv" in text
     assert "Newly loaded: wave" in text
+
+
+# The figures for modules and packages.
+
+
+def test_summary_counts_modules_and_packages() -> None:
+    report = report_of(
+        edge(0, "xml.dom.minidom", "app", self_modules=4),
+        edge(1, "xml.dom.domreg", "xml.dom", parent_id=0, self_modules=1),
+        edge(2, "wave", "app", self_modules=1),
+        edge(3, "wave", "other", loaded=False),
+    )
+
+    figures = summary(report)
+
+    assert figures["modules_loaded"] == 6
+    assert figures["packages_loaded"] == 2
+    assert "6 modules loaded (2 packages)" in report.render_text()
+
+
+def test_compare_reports_counts_modules_and_packages() -> None:
+    before = report_of(edge(0, "csv", "app", self_modules=2))
+    after = report_of(
+        edge(0, "csv", "app", self_modules=2),
+        edge(1, "xml.dom", "app", self_modules=2),
+    )
+
+    text = compare_reports(before, after)
+
+    assert "Modules loaded: 2 -> 4" in text
+    assert "Packages loaded: 1 -> 2" in text
+
+
+# Imports made by extension modules.
+
+
+def test_extension_module_import_is_an_eager_importer() -> None:
+    report = report_of(
+        edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=10.0),
+        edge(1, "numbers", "mypkg.web", parent_id=0, cum_ms=40.0, self_ms=40.0),
+        edge(2, "_decimal", "decimal", kind="from", cum_ms=5.0, self_ms=5.0),
+        edge(
+            3, "numbers", "_decimal", parent_id=2, loaded=False, extension_module=True
+        ),
+    )
+
+    # The extension needs numbers whenever it loads, so deferring
+    # mypkg.web only moves the cost of numbers, and nothing is advised.
+
+    assert all(row["importer"] != "_decimal" for row in candidates(report))
+    assert summary(report)["estimated_saving_ms"] == 100.0 - 40.0
+    assert {row["imported"]: row["shared"] for row in candidates(report)}[
+        "numbers"
+    ] == ["_decimal"]
+
+    found = chain(report, "numbers")
+
+    assert found is not None and found["best_cut"] is None
+
+    text = report.render_text()
+
+    assert "(3) an extension module made the import" in text
+
+
+# Declared lazy, and deferred in this run.
+
+
+def test_declared_lazy_loaded_eagerly_is_planned_but_not_offered() -> None:
+    report = report_of(
+        edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=10.0, declared_lazy=True),
+        edge(1, "xml.dom", "mypkg.web", parent_id=0, cum_ms=90.0, self_ms=90.0),
+        edge(2, "wave", "app", cum_ms=20.0, self_ms=20.0),
+    )
+
+    rows = {row["imported"]: row for row in candidates(report)}
+
+    # Decided already, so no best cut, but the cost is in the saving.
+
+    assert rows["mypkg.web"]["declared_lazy"] is True
+    assert rows["mypkg.web"]["already_lazy"] is False
+    assert rows["mypkg.web"]["saving_ms"] == 100.0
+
+    figures = summary(report)
+
+    assert figures["estimated_saving_ms"] == 120.0
+    assert figures["best_cut"] == 2
+
+    found = chain(report, "xml")
+
+    assert found is not None and found["best_cut"] is None
+
+    text = report.render_text()
+
+    assert "declared lazy, loaded eagerly: deferral is off in this run" in text
+    assert "Declared lazy, loaded eagerly: 1 imports (100.0 ms cumulative)" in text
+
+
+def test_declared_lazy_form_the_shim_cannot_defer() -> None:
+    text = report_of(
+        edge(0, "wave", "app", kind="from", cum_ms=10.0, declared_lazy=True)
+    ).render_text()
+
+    assert "declared lazy, loaded eagerly: unwrapt cannot defer this form" in text
+
+
+def test_declared_lazy_is_not_an_eager_importer() -> None:
+    report = report_of(
+        edge(0, "mypkg.web", "app", cum_ms=100.0, self_ms=10.0),
+        edge(1, "xml.dom", "mypkg.web", parent_id=0, cum_ms=90.0, self_ms=90.0),
+        edge(2, "xml.dom", "other", kind="from", loaded=False, declared_lazy=True),
+    )
+
+    # The other importer is decided lazy, so the cost does not move.
+
+    assert summary(report)["estimated_saving_ms"] == 100.0
+    assert {row["imported"]: row["shared"] for row in candidates(report)}[
+        "xml.dom"
+    ] == []
+
+
+# Imports used while their importer loads.
+
+
+SOURCE = """\
+import wave
+import plistlib
+import colorsys
+import difflib
+import string
+import xml.dom as dom
+import csv
+import gzip
+
+READER = wave.Wave_read
+
+
+class Holder:
+    colour = colorsys.rgb_to_hsv
+
+
+@string.capwords
+def decorated(value=difflib.SequenceMatcher):
+    return plistlib.dumps({})
+
+
+def annotated(value: csv.Dialect) -> None:
+    pass
+
+
+if TYPE_CHECKING:
+    gzip.open
+
+if __name__ == "__main__":
+    dom.Node
+"""
+
+
+def _source_report(tmp_path: Path, python: str) -> Report:
+    path = tmp_path / "mod.py"
+    path.write_text(SOURCE)
+
+    names = ["wave", "plistlib", "colorsys", "difflib", "string", "xml.dom", "csv"]
+    names.append("gzip")
+
+    report = report_of(
+        *(
+            edge(index, name, "mod", line=index + 1, file=str(path), cum_ms=1.0)
+            for index, name in enumerate(names)
+        )
+    )
+    report.python = python
+
+    return report
+
+
+def test_used_at_load_reads_the_load_time_code(tmp_path: Path) -> None:
+    report = _source_report(tmp_path, "3.13.2")
+
+    used = {row["imported"]: row["used_at_load"] for row in candidates(report)}
+
+    # Module-level code, class bodies, decorators, default arguments and
+    # evaluated annotations run at load; function bodies, TYPE_CHECKING
+    # blocks and a __main__ guard in an imported module do not.
+
+    assert used == {
+        "wave": True,
+        "plistlib": False,
+        "colorsys": True,
+        "difflib": True,
+        "string": True,
+        "xml.dom": False,
+        "csv": True,
+        "gzip": False,
+    }
+
+    rows = {row["imported"]: row for row in candidates(report)}
+
+    assert rows["wave"]["saving_ms"] == 0.0
+    assert rows["plistlib"]["saving_ms"] == 1.0
+
+    # Left out of the plan, so the saving is that of the rows not used
+    # at load that both routes can defer: plistlib and gzip, since
+    # `import xml.dom as dom` is a form the shim cannot defer.
+
+    assert summary(report)["estimated_saving_ms"] == 2.0
+    assert "used at load (line 10), deferring saves nothing" in report.render_text()
+
+
+def test_used_at_load_annotations_lazy_from_3_14(tmp_path: Path) -> None:
+    report = _source_report(tmp_path, "3.14.0")
+
+    used = {row["imported"]: row["used_at_load"] for row in candidates(report)}
+
+    assert used["csv"] is False
+    assert used["wave"] is True
+
+
+def test_used_at_load_leaves_an_unreadable_source_alone(tmp_path: Path) -> None:
+    broken = tmp_path / "broken.py"
+    broken.write_text("import wave\nwave.x(\n")
+
+    report = report_of(
+        edge(0, "wave", "broken", line=1, file=str(broken), cum_ms=5.0),
+        edge(1, "csv", "gone", line=1, file=str(tmp_path / "gone.py"), cum_ms=5.0),
+    )
+
+    assert [row["used_at_load"] for row in candidates(report)] == [False, False]
+    assert summary(report)["estimated_saving_ms"] == 10.0
+
+
+def test_used_at_load_found_in_the_run() -> None:
+    report = report_of(
+        edge(0, "app.web", "app", cum_ms=50.0),
+        edge(1, "plistlib", "app.web", parent_id=0, loaded=False, deferred=True),
+        edge(
+            2,
+            "plistlib",
+            "app.web",
+            parent_id=0,
+            kind="resolve",
+            resolves=1,
+            used_in="app.web",
+            already_lazy=True,
+            declared_lazy=True,
+        ),
+        edge(3, "wave", "app.web", parent_id=0, loaded=False, deferred=True),
+        edge(
+            4,
+            "wave",
+            "app.web",
+            kind="resolve",
+            resolves=3,
+            used_in="app",
+            already_lazy=True,
+            declared_lazy=True,
+        ),
+    )
+
+    # The resolve inside the import call that loaded app.web saved
+    # nothing; the one after it did.
+
+    used = {entry["module"]: entry["used_at_load"] for entry in deferred_used(report)}
+
+    assert used == {"plistlib": True, "wave": False}
+    assert "remove the declaration" in report.render_text()
+
+
+def test_documented_schema_example_is_current() -> None:
+    # The JSON example on the reading-the-report page is the schema the
+    # report writes: same version, and every edge with the same fields.
+
+    path = Path(__file__).parent.parent / "docs" / "_static" / "report-schema.json"
+    example = json.loads(path.read_text())
+    written = report_of(edge(0, "csv", "app")).to_dict()
+
+    assert example["schema"] == SCHEMA
+    assert set(example) == set(written)
+
+    for item in example["edges"]:
+        assert set(item) == set(written["edges"][0])
+
+    assert Report.from_dict(example).render_text()

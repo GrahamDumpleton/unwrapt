@@ -110,6 +110,22 @@ def test_baseline_report_structure(tmp_path: Path) -> None:
     assert xml_chain is not None
     assert xml_chain["module"] == "xml"
 
+    # None of the application's own imports is used at load, and the
+    # source check finds the one in the standard library that is:
+    # sqlite3.dbapi2 uses datetime at module level.
+
+    used = {
+        (row["importer"], row["imported"]): row["used_at_load"]
+        for row in candidates(loaded)
+    }
+
+    assert not any(
+        flag
+        for (importer, _), flag in used.items()
+        if (importer or "").startswith("myapp")
+    )
+    assert used[("sqlite3.dbapi2", "datetime")] is True
+
     # The estimate never exceeds the total, whatever the nest.
 
     figures = summary(loaded)

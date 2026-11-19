@@ -85,7 +85,7 @@ report = unwrapt.stop_profile(write=False)
 
 report.labels.update(app="shop", release="r3", role="host", outcome="fork")
 
-report.to_dict()       # {"schema": 3, "labels": {...}, "edges": [...], ...}
+report.to_dict()       # {"schema": 4, "labels": {...}, "edges": [...], ...}
 report.render_text()
 report.render_json()
 ```
@@ -347,10 +347,15 @@ plain dicts and lists, ready to serialise.
 
 - `load_report(path) -> Report`: read a saved JSON report.
 
-- `summary(report)`: the total import time (the outermost calls only,
-  since times nest), the modules loaded, the edges and the import
+- `summary(report, *, min_ms=None, packages=None)`: the total import
+  time (the outermost calls only, since times nest), `modules_loaded`,
+  the modules the run added to `sys.modules`, and `packages_loaded`,
+  the top-level packages they belong to, the edges and the import
   calls they stand for, the conservative estimated saving of deferring
-  everything both routes can, and the best single cut.
+  everything both routes can, and the best single cut. The estimate
+  counts the imports declared lazy that the run loaded eagerly, and
+  leaves out the candidates that `min_ms` and `packages` select (the
+  report's filters by default) whose importers use them at load.
 
 - `who_pays(report)`: for each module loaded, the edge, importer and
   labels that paid for it, its cost, and `also_needed_by`, the other
@@ -361,9 +366,12 @@ plain dicts and lists, ready to serialise.
 - `candidates(report, *, min_ms=None, packages=None)`: the
   module-level imports that loaded a module, by cumulative time, each
   with the module it imported and the submodules it names, its route
-  columns and reason, its shared importers, and
-  `saving_ms`, what deferring it alone would save once the cost that
-  would only move to another eager importer is taken off.
+  columns and reason, `declared_lazy` and `already_lazy`, its shared
+  importers, `used_at_load`, whether its importer's source uses the
+  name it binds at load, and `saving_ms`, what deferring it alone
+  would save once the cost that would only move to another eager
+  importer is taken off, and zero when it is used at load. The imports
+  an extension module makes as it loads are never rows.
 
 - `chain(report, module)` and `chains(report, limit=8)`: the import
   calls that loaded a module, outermost first, with the best cut.
@@ -373,7 +381,9 @@ plain dicts and lists, ready to serialise.
 
 - `deferred_used(report)` and `deferred_unused(report)`: in a profile
   with deferral on, the deferred imports the run used anyway, with
-  where and at what cost, and those it never used.
+  where and at what cost, and `used_at_load` for one used while its
+  importer was still loading, which saved nothing; and those it never
+  used.
 
 - `compare_reports(before, after)`: the text the `--compare` option
   prints.

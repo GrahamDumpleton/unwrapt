@@ -205,3 +205,46 @@ def test_never_calls_set_lazy_imports() -> None:
 
     assert facts["mode"] == "normal"
     assert facts["filter"] is None
+
+
+def test_config_applies_to_a_name_another_module_has_pending(
+    tmp_path: Path,
+) -> None:
+    # Another module's lazy import leaves wave pending in
+    # sys.lazy_modules, which holds names only. The entry point's own
+    # eager statement is still its own, and the configuration defers it;
+    # the other module's binding still reifies natively.
+
+    (tmp_path / "pendmod.py").write_text("lazy import wave\n")
+
+    config = json_config(tmp_path / "lazy.json", {"__main__": ["wave"]})
+
+    facts = run_facts(
+        SETUP
+        + """
+        import pendmod
+
+        pending = "wave" in sys.lazy_modules
+
+        import wave
+
+        facts = {
+            "pending": pending,
+            "deferred": "wave" not in sys.modules,
+            "deferrals": [d.module for d in unwrapt.deferred()],
+        }
+
+        pendmod.wave.Wave_read
+
+        facts["native_resolved"] = type(pendmod.wave) is types.ModuleType
+
+        print(json.dumps(facts))
+        """,
+        env={"UNWRAPT_CONFIG": config},
+        cwd=tmp_path,
+    )
+
+    assert facts["pending"] is True
+    assert facts["deferred"] is True
+    assert facts["deferrals"] == ["wave"]
+    assert facts["native_resolved"] is True

@@ -31,6 +31,10 @@ and leaves everything else to the interpreter:
   use, and it recognises that call by the pending binding in
   `sys.lazy_modules` and passes it straight through: native expects
   the real module back, and deferring it again would hand it a proxy.
+  An eager `import x` in another module, while `x` is pending, is not
+  a reification, and is told apart by the instruction its statement
+  is at (see [the registry](#the-lazy-import-registry)), so a
+  configuration entry for it applies as for any other statement.
 
 - An explicit `lazy import x` statement is likewise native's, and is
   recognised the same way: the statement registers its binding in
@@ -109,6 +113,32 @@ when any `name.n` for the names in its fromlist is. Early 3.15
 pre-releases registered less (before 3.15.0a8 an explicit `lazy import`
 left no entry at all), and are not what these facts describe.
 
+The registry holds names, not the modules that declared them, and
+three more facts follow from that, verified on 3.15.0:
+
+- An eager `import x` in one module while another module has `x`
+  pending also finds its name in the registry. It is told apart from a
+  reification by the instruction its frame is at: an import statement
+  that is not lazy calls `__import__` from `IMPORT_NAME`, while native
+  reifies from the instruction that first loads the name
+  (`LOAD_GLOBAL`, `LOAD_NAME` or `LOAD_ATTR`), or from C code. Both
+  unwrapt layers read that instruction, and only for a pending name.
+
+- Native reifies with the globals of the frame whose code first used
+  the name, not those of the module that declared it: `modb` reading
+  `moda.x` makes the call with `modb`'s globals. Nothing the hook is
+  given names the declaring module, and the one place that does,
+  `builtins.__lazy_import__` at the `lazy` statement, cannot be
+  wrapped: a pass-through wrapper over it makes every `lazy import`
+  fail with "only allowed at module level". So the profile credits
+  such an import to the module that used it first.
+
+- Once `x` has been loaded, by an eager import elsewhere for example,
+  its entry is gone, but a binding declared lazy still reifies on its
+  first use with an `__import__` call. That call has nothing pending,
+  and is recorded as an ordinary already-loaded import by the module
+  that used the binding.
+
 ## Profile mode on 3.15
 
 The profiler does not neutralise native laziness, because the
@@ -126,9 +156,14 @@ Instead:
   recognised by its [registry entry](#the-lazy-import-registry),
   flagged `native_lazy` in the
   [JSON report](reading-the-report.md), marked already lazy, and
-  explained by a warning block in the text report: the cost is real
-  and attributed to the importing module, but the line is the site of
-  first use.
+  explained by a warning block in the text report: the cost is real,
+  but it is attributed to the module whose code first used the name,
+  which is the declaring module unless another module reached the
+  binding through it (see [the registry](#the-lazy-import-registry)),
+  and the line is the site of first use.
+
+- An eager import of a name another module has pending is recorded as
+  the eager load it is, not as a native reification.
 
 - A native lazy import never touched is never loaded, and so never
   appears in the report at all: the documented reason the guide says

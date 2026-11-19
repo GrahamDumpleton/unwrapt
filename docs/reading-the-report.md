@@ -7,16 +7,19 @@ all this; this page explains what each thing *is*.
 ## The summary header
 
 ```
-Summary: 1240.5 ms total import time, 187 modules loaded, 412 edges (3190 import calls)
+Summary: 1240.5 ms total import time, 412 modules loaded (187 packages), 1260 edges (3190 import calls)
 Estimated saving if every deferrable edge were deferred: 640.0 ms (conservative; edge times nest and are not additive)
 Best single cut: myapp -> myapp.analytics (412.3 ms cumulative)
+Declared lazy, loaded eagerly: 2 imports (96.4 ms cumulative), counted in the estimated saving; turning deferral on is what saves them
 ```
 
 - **Total import time** is the sum of the outermost import calls. A
   nest of imports counts once, at its root.
 
-- **Modules loaded** counts the distinct top-level packages the run
-  actually loaded.
+- **Modules loaded** counts the modules the run added to
+  `sys.modules`, each package and submodule on its own, and the
+  **packages** beside it the distinct top-level packages they belong
+  to.
 
 - **Edges** counts the records in the report, and **import calls** the
   calls they stand for: repeated already-loaded hits are folded into
@@ -30,10 +33,22 @@ Best single cut: myapp -> myapp.analytics (412.3 ms cumulative)
   another eager importer rather than disappear. It never sums
   cumulative times across ancestors and descendants, because they
   nest: the outermost edges only. It is an estimate, and labelled as
-  one.
+  one. It leaves out the candidates [used at load](#used-at-load),
+  since deferring those saves nothing, and it counts the imports
+  declared lazy that the run loaded eagerly.
 
 - **The best single cut** is the largest best cut across the chains:
   the one link whose deferral removes the most.
+
+- **Declared lazy, loaded eagerly**, when there are any among the
+  candidates listed, counts the imports named in `__lazy_modules__`
+  (below Python 3.15) or in the configuration's `lazy_modules` that
+  this run loaded at their statements, both routes could defer, and
+  their importers do not use at load. That is what an eager profile,
+  with deferral off, does with them. They are decided already, so
+  they are not offered as new candidates or best cuts, but their cost
+  is real, and turning deferral on is what saves it, so it is in the
+  estimated saving.
 
 On Python 3.15 runs with native lazy imports, a warning block follows
 the header explaining the edges recorded at first use; see
@@ -46,8 +61,9 @@ sections after the header, telling whether each deferral paid off:
 
 ```
 Deferred but used anyway: loaded during the run, so not a saving
-  load ms  module   deferred in  first used in  line
+  load ms  module   deferred in  first used in  line  notes
      12.8  decimal  mypkg.web    mypkg.web        41
+      3.1  numpy    mypkg.calc   mypkg.calc        9  used at load, deferring saves nothing; remove the declaration
 
 Deferred and never used: deferred for the whole run
   module  deferred in
@@ -63,6 +79,13 @@ Deferred and never used: deferred for the whole run
   its cost still counts in the total, the heavy modules and the
   chains. It is not a candidate row: the statement is already
   deferred.
+
+- **used at load** in the notes marks a deferred import used while its
+  importer was still loading: the resolve happened inside the import
+  call that loaded the importer, so the deferral saved nothing, only
+  moved the load a few lines down. The declaration can go. This is
+  how a use the source check cannot see, through `getattr()` or
+  `globals()`, shows once the deferral is tried.
 
 - **Deferred and never used** lists the deferrals the run never
   touched. These are the savings, but what each would have cost is
@@ -114,14 +137,29 @@ Module-level imports the run loaded, ranked by cumulative time:
 | function level | n/a (2) | n/a (2) |
 
 - **notes**: `shared (+N: ...)` lists the other modules that also
-  imported the same module and are not already lazy, loaded or cache
-  hit: the cost moves to the next one unless all of them are deferred.
-  The same module means the same name in the imported column, so
-  `from xml import dom` and `import xml.dom` are importers of the same
-  module, while `import xml` is not.
-  `already lazy` marks an import already declared deferred, by
-  `__lazy_modules__`, by the configuration, or natively on 3.15: no
-  action needed.
+  imported the same module and are neither lazy nor declared lazy,
+  loaded or cache hit: the cost moves to the next one unless all of
+  them are deferred. The same module means the same name in the
+  imported column, so `from xml import dom` and `import xml.dom` are
+  importers of the same module, while `import xml` is not. An
+  extension module that imports the module as it loads is one of
+  them.
+
+- `already lazy` marks an import this run deferred, natively on 3.15:
+  no action needed.
+
+- `declared lazy, loaded eagerly` marks an import declared deferred,
+  by `__lazy_modules__` below 3.15 or by the configuration, that this
+  run loaded at its statement anyway. With `deferral is off in this
+  run`, the profile was an eager one, and turning deferral on is what
+  saves it; with `unwrapt cannot defer this form`, the declaration
+  names a form the shim leaves eager, footnote (1). Either way it is
+  decided already, not a new candidate, and its cost counts in the
+  estimated saving when both routes can defer it.
+
+- `used at load (line N), deferring saves nothing` marks a row whose
+  importer uses the name the import binds while it loads, on line N
+  of its source: see [used at load](#used-at-load).
 
 Rows under the `min_ms` profile option are hidden, and the
 `packages` option hides importers outside the named top-level
@@ -138,6 +176,45 @@ after a rewrite to `import x` and attribute access on older Pythons.
 
 (2) function level imports are already deferred until the function
 runs, so there is nothing to decide.
+
+(3) an extension module made the import as it loaded, so there is no
+statement either route could defer. These rows appear only in the
+import chains, never among the candidates.
+
+### Used at load
+
+A deferred import resolves the moment its name is used, so an import
+whose importer uses it at module level, while the importer is still
+loading, saves nothing by being deferred. For each candidate row a
+route could defer, and that this run did not, the report reads the
+importer's source and looks for a use of the name the statement binds
+(`numpy` for `import numpy`, `c` for `import a.b as c`, each name for
+a `from` import) in the code that runs at load:
+
+- the module body, outside function bodies;
+
+- class bodies, which run as the class is defined;
+
+- decorators and default arguments, which run as the function is
+  defined;
+
+- annotations, when the profiled Python evaluates them as the function
+  or variable is defined: below Python 3.14, without
+  `from __future__ import annotations`.
+
+An `if TYPE_CHECKING:` body never runs, and an
+`if __name__ == "__main__":` body runs only in the main module, so
+neither counts in an imported module. Such a row is marked
+`used_at_load`, saves nothing, and is left out of the plan, the
+estimated saving and the best cuts; the module it imports then counts
+as one some importer loads anyway.
+
+Only the rows listed are checked, so the display filters bound the
+cost. A source that cannot be read or parsed, such as a report
+re-rendered on another machine, leaves its rows as they are. A use the
+source does not spell out, through `getattr()` or `globals()`, is not
+seen; the [deferral sections](#deferral-sections) show it once the
+deferral is tried.
 
 ## Heavy modules
 
@@ -175,7 +252,9 @@ filters apply here as well, and leave a note when they do:
 The cumulative time of each importing module's direct module-level
 loads. These are the files to edit first: the sum never counts the
 imports made by the modules a file goes on to load, so it is the cost
-sitting behind `import` statements in that one file.
+sitting behind `import` statements in that one file. The imports an
+extension module makes as it loads are left out, since there is no
+file to edit.
 
 The section lists the eight costliest importers, as many as `rows`
 says, and says how many it left out; `by_importer()` in
@@ -199,16 +278,25 @@ loaded it, outermost first:
 A chain is the list of places the load could be cut. Deferring an
 outer link removes the whole subtree beneath it, so the outermost safe
 link saves the most, and that is what the **best cut** mark is: the
-outermost link both routes can defer that is not already lazy, and
-whose deferral is not undone by another eager importer of a module in
-its subtree. When every link is undone, no link is marked.
+outermost link both routes can defer that is neither already lazy nor
+declared lazy, that its importer does not use at load, and whose
+deferral is not undone by another eager importer of a module in its
+subtree. When every link is undone, no link is marked, and when the
+outermost safe link is declared lazy already, none is either: that
+chain is decided.
+
+A link whose importer is an extension module, such as
+`_decimal -> numbers`, is an import the extension made as it loaded,
+with no file or line and `no (3)` in both route columns. It is an
+eager importer of its module: the module loads whenever the extension
+does.
 
 ## The JSON form
 
 `UNWRAPT_PROFILE_FORMAT=json`, or `Report.render_json()`, writes the
 report as JSON. It is versioned data, and a contract: the `schema`
 field says which version of the format it is, and is bumped whenever
-a field changes incompatibly. This page describes schema 3.
+a field changes incompatibly. This page describes schema 4.
 
 The JSON holds the facts the recorder saw, and nothing derived from
 them. The analysis the text report shows (the summary figures, who
@@ -249,7 +337,12 @@ Each edge carries:
 
 - `importer`, `imported`, `file` and `line`: the importing module, the
   full dotted name imported, and the statement's file and line, null
-  when the call came from C code. `imported` is always absolute: a
+  when the call came from C code. The statement is found even when
+  another hook wraps `builtins.__import__` over the recorder and
+  passes calls on: it is the nearest frame, from the hook's caller up,
+  whose globals are the ones the import was given. For an import an
+  extension module made as it loaded, the importer is the extension,
+  and `file` and `line` are null. `imported` is always absolute: a
   relative import is resolved against the importer's package, as the
   import system resolves it, so `from . import json` in `flask` has
   `flask`, and `from ..other import z` in `pkg.sub` has `pkg.other`.
@@ -286,17 +379,26 @@ Each edge carries:
 - `cum_ms` and `self_ms`: the wall time of the call, and that time
   minus the time spent in nested import calls.
 
+- `self_modules`: how many modules the call added to `sys.modules`,
+  less those its nested import calls added. The summary's modules
+  loaded is their sum.
+
 - `defer`: whether the import can be deferred. `native` is whether
   native lazy imports on Python 3.15 could defer the statement's form.
   `unwrapt` is whether the shim would defer this call if it were
   listed, by the shim's own rules, so a consumer never suggests a
   deferral the shim would refuse, and `reason` is the first rule it
-  fails: `function-level`, `class-level`, `relative`, `from-import`,
-  `dotted-as`, or `already-loaded` for a call that found the module
-  loaded.
+  fails: `extension-module` for an import an extension module made
+  as it loaded, which neither route can defer, `function-level`,
+  `class-level`, `relative`, `from-import`, `dotted-as`, or
+  `already-loaded` for a call that found the module loaded.
 
-- `already_lazy`: the import is already declared deferred, by
-  `__lazy_modules__`, by the configuration, or natively on 3.15.
+- `declared_lazy`: the import is declared deferred, by
+  `__lazy_modules__` below 3.15, by the configuration's
+  `lazy_modules`, or natively on 3.15, whether or not this run
+  deferred it. `already_lazy`: this run deferred it, by the shim
+  (`deferred`) or natively (`native_lazy`). An eager profile, with
+  deferral off, has declared imports that are not already lazy.
   `native_lazy`: recorded at native reification on 3.15.
 
 - `deferred` and `resolution`: the shim handed back a lazy proxy, in a
@@ -308,28 +410,35 @@ Each edge carries:
 - `labels`: the index of the label set in force when the statement
   ran.
 
-`python -m unwrapt.report` reads schema 3 reports, and says so for
-any other version rather than misreading it. A schema 2 report, from
-unwrapt 1.0.0a2, cannot be converted, since it never recorded how many
-levels up a relative import reached: profile the application again.
+`python -m unwrapt.report` reads schema 4 reports, and says so for
+any other version rather than misreading it. An older report cannot
+be converted: schema 3, from unwrapt 1.0.0a3 and 1.0.0a4, never
+recorded how many modules each call loaded, nor told an import
+declared lazy from one the run deferred, and credited the imports of
+extension modules to the import system; schema 2, from 1.0.0a2, never
+recorded how many levels up a relative import reached. Profile the
+application again.
 
 ## Limits of this report
 
-Every report ends with this block, because the report cannot see:
+Every report ends with this block, because the report cannot see
+everything:
 
-- import-time use of the imported name by the importing module: class
-  bases, decorators, default arguments, annotations without
-  `from __future__ import annotations` and module-level calls all
-  force resolution at import time, and none of them show here;
+- import-time use of the imported name by the importing module is
+  checked in its source, for the candidates listed (see
+  [used at load](#used-at-load)), but a use the source does not spell
+  out, through `getattr()` or `globals()`, is not seen until the
+  deferral is tried, when the deferral sections show it;
 
 - a `try/except ImportError` around the import, so deferring a guarded
   optional dependency would move its error to first use;
 
 - other workloads: the report describes the run that was profiled;
 
-- imports through `importlib.import_module` and the C import API:
-  their time is inside the enclosing cumulative figure but they get no
-  row of their own. A submodule a `from` import loads is named on that
+- imports through `importlib.import_module`, or by C code that calls
+  the import machinery without going through `__import__`: their time
+  is inside the enclosing cumulative figure but they get no row of
+  their own. A submodule a `from` import loads is named on that
   import's row and shares its figures, except those a
   `from x import *` brings in, which are not named;
 

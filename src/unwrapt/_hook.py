@@ -36,7 +36,13 @@ import wrapt
 
 import unwrapt
 from unwrapt._compat import has_native_lazy_imports, mark_defer, resolve_subscribers
-from unwrapt._config import Config, is_candidate, is_native_pending
+from unwrapt._config import (
+    Config,
+    is_candidate,
+    is_import_statement,
+    is_native_pending,
+    statement_frame,
+)
 from unwrapt._records import Deferral, Resolution
 
 ImportFunction = Callable[..., types.ModuleType]
@@ -288,7 +294,11 @@ def _make_hook(shim: Shim) -> ImportFunction:
         reification by the pending binding in sys.lazy_modules and
         chains through. An explicit `lazy import` statement registers
         its binding there too, so a config entry that duplicates one is
-        left to native in the same way.
+        left to native in the same way. The registry holds names only,
+        so an eager import statement in another module, for a name some
+        module has pending, is pending too; the instruction the
+        statement's frame is at tells it apart, and the configuration
+        applies to it as to any other statement.
 
         Everything else chains unchanged to the import function the
         hook replaced, so an import never behaves differently merely
@@ -306,7 +316,11 @@ def _make_hook(shim: Shim) -> ImportFunction:
             and locals is globals
             and name not in sys.modules
         ):
-            if has_native_lazy_imports() and is_native_pending(name):
+            if (
+                has_native_lazy_imports()
+                and is_native_pending(name)
+                and not _at_import_statement(globals)
+            ):
                 if config.debug:
                     importer = globals.get("__name__", "<unknown>")
                     print(
@@ -413,6 +427,22 @@ def _make_proxy(
     proxy = wrapt.LazyObjectProxy(resolve, interface=types.ModuleType)
 
     return cast(types.ModuleType, proxy)
+
+
+def _at_import_statement(globals: Mapping[str, object]) -> bool:
+    """Whether the hook's call came from an import statement that is
+    not lazy, rather than from a native reification. Never raises.
+
+    Called from the hook only, so the hook's caller is two frames up;
+    the statement is found from there as the recorder finds it.
+    """
+
+    try:
+        caller = sys._getframe(2)
+    except ValueError:
+        return False
+
+    return is_import_statement(statement_frame(caller, globals))
 
 
 def _importer_name(globals: Mapping[str, object]) -> str | None:

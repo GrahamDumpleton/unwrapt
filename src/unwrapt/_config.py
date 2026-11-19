@@ -19,6 +19,7 @@ installs anything either.
 
 import os
 import sys
+import types
 import warnings
 from collections.abc import Collection, Container, Mapping, Sequence
 from dataclasses import dataclass, field, replace
@@ -322,6 +323,95 @@ def env_flag(name: str) -> bool | None:
     return None
 
 
+# How many frames, the hook's caller included, are searched for the
+# statement that made an import call, when something wraps __import__
+# over the hook.
+
+FRAME_LIMIT = 8
+
+
+def statement_frame(
+    caller: types.FrameType, globals: Mapping[str, object] | None
+) -> types.FrameType:
+    """The frame of the statement that made an import call.
+
+    An import statement passes its own module's globals to __import__,
+    and a hook wrapping __import__ over unwrapt's passes the same
+    object on, so the statement's frame is the nearest frame, from the
+    hook's caller up, whose globals are the ones the hook was given. In
+    the common case, with nothing wrapped over the hook, that is the
+    caller itself. The walk stops after FRAME_LIMIT frames, and the
+    caller is the answer when none matches: a call that passed other
+    globals, or one made from C code with no frame of its own.
+    """
+
+    if globals is None or caller.f_globals is globals:
+        return caller
+
+    frame = caller.f_back
+    depth = 1
+
+    while frame is not None and depth < FRAME_LIMIT:
+        if frame.f_globals is globals:
+            return frame
+
+        frame = frame.f_back
+        depth += 1
+
+    return caller
+
+
+def _import_name_opcode() -> int | None:
+    """The IMPORT_NAME opcode of this interpreter, or None.
+
+    Found by running a compiled `import` statement against a private
+    __import__ that reads the instruction its caller is at, so that the
+    opcode module, which the profiled program may import itself, is
+    never loaded by unwrapt. None when the probe cannot run, such as
+    under a lazy import mode that defers every statement.
+    """
+
+    found: list[int] = []
+
+    def probe(name: str, *args: object, **kwargs: object) -> types.ModuleType:
+        frame = sys._getframe(1)
+        found.append(frame.f_code.co_code[frame.f_lasti])
+
+        return types.ModuleType(name)
+
+    try:
+        code = compile("import _unwrapt_probe", "<unwrapt>", "exec")
+        exec(code, {"__builtins__": {"__import__": probe}})
+    except Exception:
+        return None
+
+    return found[0] if found else None
+
+
+_IMPORT_NAME = _import_name_opcode() if has_native_lazy_imports() else None
+
+
+def is_import_statement(frame: types.FrameType) -> bool:
+    """Whether frame is executing an import statement. Never raises.
+
+    On Python 3.15 an import statement that is not lazy reaches
+    __import__ from an IMPORT_NAME instruction, while native reifies a
+    lazy binding from the instruction that first loads the name
+    (LOAD_GLOBAL, LOAD_NAME or LOAD_ATTR), or from C code, so the
+    instruction tells an eager import of a name some other module has
+    pending from a reification of that binding. Always False below
+    3.15, where nothing is reified natively.
+    """
+
+    if _IMPORT_NAME is None:
+        return False
+
+    try:
+        return frame.f_code.co_code[frame.f_lasti] == _IMPORT_NAME
+    except Exception:
+        return False
+
+
 def is_native_pending(name: str, fromlist: Sequence[str] | None = ()) -> bool:
     """Whether a native lazy binding for the import of name is pending.
 
@@ -343,6 +433,10 @@ def is_native_pending(name: str, fromlist: Sequence[str] | None = ()) -> bool:
     `lazy from . import n` never registers the package. Native reifies
     it with the call `__import__("x", fromlist=("n",))`, so with a
     fromlist the call is pending when name is, or any name.n is.
+
+    The registry holds names only, so an eager import statement for a
+    name that another module has pending is pending too: the hooks tell
+    it from a reification with is_import_statement().
 
     Below 3.15 the attribute does not exist and this is always False.
     """

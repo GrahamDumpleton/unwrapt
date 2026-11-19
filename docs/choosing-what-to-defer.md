@@ -92,6 +92,19 @@ The order of attention is not the order of the sections:
 4. **Only then, the candidate list.** Cumulative time ranks it because
    the saving from deferring one import line is its cumulative time:
    the wrapper with near-zero self time is often the best candidate.
+   Two kinds of row are not new candidates. A row marked
+   `declared lazy, loaded eagerly` is a decision already made, in
+   `__lazy_modules__` or the configuration, that this eager profile
+   loaded because deferral was off; its cost is in the estimate,
+   because turning deferral on is what saves it. A row marked
+   `used at load` is one its importer uses while it loads, so
+   deferring it saves nothing.
+
+An import an extension module makes as it loads shows in the chains
+as a link from the extension, such as `_decimal -> numbers`, with
+`no (3)` in both route columns: there is no statement to defer, and
+the module loads whenever the extension does. Cut above the
+extension, or not at all.
 
 One rule holds across all of it: edge times nest. If A imports B
 imports C, cum(A) already contains cum(B) and cum(C), so no figure in
@@ -116,9 +129,13 @@ Five principles, each visible in the report:
    than disappearing. The estimate already accounts for this.
 
 4. **Prefer links whose imported name is only used inside functions
-   and methods.** The profile cannot see this; reading the source for
-   the candidate row is the check, and the triage table below is the
-   order of questions.
+   and methods.** The report checks the importer's source for the
+   candidates it lists, and marks a row `used at load` when the name
+   is used in code that runs as the module loads: such a row saves
+   nothing, and is left out of the estimate and the best cuts. It
+   cannot see a use through `getattr()` or `globals()`, so reading
+   the source for the candidate row is still the check, and the
+   triage table below is the order of questions.
 
 5. **Take the largest estimated saving first, and re-profile between
    batches.** Deferring the top item changes the chains: the
@@ -131,7 +148,7 @@ For every edge you intend to change, answer in this order:
 | Question | If yes | If no |
 | --- | --- | --- |
 | Is it a module-level `import x` or `import x as y`, ready on both routes? | continue | `from x import y` or `import a.b as c`: on 3.15+ continue; on older Pythons either rewrite to `import x` and use `x.y`, or accept the cost, judged on the size of the saving |
-| Is the name used while the importing module itself is being imported (class bases, decorators, default arguments, annotations without `from __future__ import annotations`, module-level calls)? | **leave eager**, or move the use inside a function first | continue |
+| Is the name used while the importing module itself is being imported (class bases, decorators, default arguments, annotations without `from __future__ import annotations`, module-level calls)? A row marked `used at load` already answers yes. | **leave eager**, or move the use inside a function first | continue |
 | Is the import inside `try/except ImportError` (an optional dependency)? | **leave eager**: laziness would move the error to first use, where nobody is listening for it | continue |
 | Does the module have import-time side effects that must happen at start-up (registering handlers or plugins, patching, configuring logging, signal handlers)? | **leave eager** | continue |
 | Is the first-use latency acceptable on the path that touches it (a request handler, a latency-critical loop)? | continue | consider warming it explicitly at a chosen point, or leave eager |
@@ -144,10 +161,14 @@ optional.
 
 How to spot each condition quickly in the source:
 
-- Import-time use: search the module for the imported name outside
-  function and method bodies. Class bases, decorators, default
-  arguments and module-level calls all count; annotations count
-  unless `from __future__ import annotations` is in effect.
+- Import-time use: the report has searched the module for the name
+  the import binds outside function and method bodies, and says
+  `used at load (line N)` when it found one. Class bases, decorators,
+  default arguments and module-level calls all count; annotations
+  count below Python 3.14 unless `from __future__ import annotations`
+  is in effect. Look for what it cannot see: `getattr()` on the
+  module, `globals()`, or a module-level call into a function that
+  uses the name.
 
 - A guarded import: look for the statement inside a `try:` block with
   `except ImportError`.
@@ -155,7 +176,8 @@ How to spot each condition quickly in the source:
 - Side effects: open the imported module's top level and look for
   registration, patching and configuration calls.
 
-The profile cannot see any of this; that is why it is the
+The profile sees only the first of these, and only as far as the
+source spells it out; that is why they are in the
 [limits block](reading-the-report.md#limits-of-this-report) of every
 report, and why the triage is yours.
 
@@ -192,7 +214,10 @@ unions with the modules' own lists.
 
 - **Watch for the cost reappearing.** It may now be paid at first use
   somewhere surprising. Profile the first request or command, not just
-  start-up, when that matters to the workload.
+  start-up, when that matters to the workload. A profile with
+  deferral on lists each deferred import the run used anyway, and
+  marks the ones used while their importer was still loading `used at
+  load`: those deferrals save nothing, and the declaration can go.
 
 - **Iterate.** Second-order effects are normal: deferring one path
   exposes another import of the same heavy module, or the next chain
@@ -229,8 +254,10 @@ Anti-patterns to name:
    lists (`shared` in `unwrapt.report.candidates()`) can also be
    deferred.
 
-4. Before editing, read the importing module's source and check for
-   import-time use of the name, and for `try/except ImportError`.
+4. Skip rows marked `declared lazy, loaded eagerly` (already decided)
+   and `used at load` (deferring saves nothing). Before editing, read
+   the importing module's source and check for import-time use of the
+   name the report could not see, and for `try/except ImportError`.
 
 5. Add the module to `__lazy_modules__` in code you own, or to the
    [configuration](external-config.md) for code you do not.

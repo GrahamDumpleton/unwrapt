@@ -81,7 +81,13 @@ hits, one edge is recorded:
   relative, and whether the statement sat at module, function or
   class level;
 
-- the statement's file and line, when the call was made from Python;
+- the statement's file and line, when the call was made from Python,
+  found even through another hook wrapping `builtins.__import__` over
+  the recorder; an import an extension module makes as it loads is
+  credited to the extension, with no file or line;
+
+- whether the import is declared lazy, by `__lazy_modules__` below
+  3.15 or by the configuration, and whether this run deferred it;
 
 - whether the module was loaded by the call or already cached, which is
   how the report knows who paid the cost: the first importer pays,
@@ -89,7 +95,8 @@ hits, one edge is recorded:
 
 - the wall time of the call (cumulative), and that time minus the
   time spent in nested import calls (self), which is how the report
-  separates a module's own cost from the cost of what it pulls in;
+  separates a module's own cost from the cost of what it pulls in,
+  and likewise the number of modules the call added to `sys.modules`;
 
 - the ids linking each edge to the import call it happened inside,
   which is how the report builds the tree and the chains;
@@ -162,8 +169,9 @@ $ python -m unwrapt.report before.json --compare after.json
 ```
 
 re-renders a saved JSON report as text, and with `--compare` diffs
-two of them: total import time, per-module self time changes, and
-modules newly loaded or no longer loaded. This is the verify and guard
+two of them: total import time, the modules and packages loaded,
+per-module self time changes, and modules newly loaded or no longer
+loaded. This is the verify and guard
 step of the strategy, without re-running the application.
 
 The text uses the display filters saved in the report, and three

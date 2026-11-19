@@ -11,13 +11,13 @@ method from the assistant's side of the table.
 1. The JSON report from a profiled run
    (`UNWRAPT_PROFILE_FORMAT=json`), which carries the facts: per-edge
    timings, the tree links, the route columns and their reasons, the
-   already-lazy flags, and the labels.
+   declared-lazy and already-lazy flags, and the labels.
 
 2. The same report rendered as text, with
    `python -m unwrapt.report report.json`. The JSON holds facts only,
    and the text carries the analysis computed from them: the summary
-   figures, the shared importers of each candidate, the chains and
-   their best cuts.
+   figures, the shared importers of each candidate, the candidates its
+   source check found used at load, the chains and their best cuts.
 
 3. The target Python version or versions, which select the route
    columns to honour.
@@ -34,7 +34,7 @@ method from the assistant's side of the table.
 
 ## The JSON schema
 
-The report the assistant receives is schema 3, described field by
+The report the assistant receives is schema 4, described field by
 field on [reading the report](reading-the-report.md#the-json-form):
 `schema` (bumped if a field ever changes incompatibly), `unwrapt` and
 `python` (versions), `labels` (what the report is of), `label_sets`,
@@ -42,7 +42,9 @@ field on [reading the report](reading-the-report.md#the-json-form):
 already-loaded hits, with:
 
 - `cum_ms` (the wall time of the call, the saving from deferring that
-  line) and `self_ms` (the call's own cost, nested imports excluded);
+  line) and `self_ms` (the call's own cost, nested imports excluded),
+  and `self_modules` (the modules the call added, nested imports
+  excluded);
 
 - `parent_id` (the enclosing import call, so chains can be walked);
 
@@ -60,11 +62,13 @@ already-loaded hits, with:
   folded edge stands for);
 
 - `defer.native` and `defer.unwrapt` (the route columns) and
-  `defer.reason` (why the shim would not defer it: `function-level`,
-  `class-level`, `relative`, `from-import`, `dotted-as`,
-  `already-loaded`);
+  `defer.reason` (why the shim would not defer it: `extension-module`,
+  which no route can, `function-level`, `class-level`, `relative`,
+  `from-import`, `dotted-as`, `already-loaded`);
 
-- `already_lazy`, `native_lazy` (recorded at native reification on
+- `declared_lazy` (named in `__lazy_modules__` or the configuration,
+  deferred or not), `already_lazy` (deferred in this run), `native_lazy`
+  (recorded at native reification on
   3.15), `deferred` and `resolution` (handed back as a lazy proxy, in a
   profile with deferral on, and the resolve edge that loaded it, if
   any), and `resolves` and `used_in` on a resolve edge;
@@ -76,7 +80,10 @@ already-loaded hits, with:
 For the assistant, the method is the guide's:
 
 1. Take the candidate rows deferrable on the required routes, in
-   descending `cum_ms`. For a 3.15-only target, use `defer.native`;
+   descending `cum_ms`, leaving out the rows `declared_lazy` (already
+   decided) and those `unwrapt.report.candidates()` marks
+   `used_at_load` (deferring them saves nothing). For a 3.15-only
+   target, use `defer.native`;
    for a mixed-support target, take rows true in both, and treat the
    rows whose `defer.reason` is a form the shim cannot defer as
    optional rewrites judged on the size of the saving.
@@ -87,7 +94,8 @@ For the assistant, the method is the guide's:
 3. For every edge you intend to change, read the importing module's
    source and answer the triage table in the guide: import-time use
    of the name, `try/except ImportError` guards, import-time side
-   effects, first-use latency. The report cannot see any of these.
+   effects, first-use latency. The report checks the first as far as
+   the source spells it out, and cannot see the rest.
 
 4. Return, per edge, the decision, the evidence and the exact edit.
 
@@ -117,6 +125,11 @@ For the assistant, the method is the guide's:
 >   eager: an import used while the importing module is being
 >   imported, a guarded optional dependency, or a module with
 >   import-time side effects that start-up depends on.
+>
+> - Do not propose an edge the report marks `used at load` (its
+>   importer uses the name while it loads, so deferring saves
+>   nothing), nor one already `declared lazy` (decided already; an
+>   eager profile loads it because deferral is off).
 >
 > - Do not propose an edge whose shared importers, as the text
 >   report lists them, cannot also be deferred, unless you also defer

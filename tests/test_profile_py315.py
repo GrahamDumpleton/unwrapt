@@ -14,6 +14,7 @@ from typing import Any
 from support import run_python, write_module
 
 from unwrapt.report import Report
+from unwrapt.report import candidates as loaded_candidates
 
 PROFILE = {
     "UNWRAPT_PROFILE": "1",
@@ -167,6 +168,66 @@ def test_explicit_lazy_import_statement_recorded_at_first_use(
     )
 
     edge = next(edge for edge in report["edges"] if edge["imported"] == "colorsys")
+
+    assert edge["native_lazy"] is True
+    assert edge["already_lazy"] is True
+
+
+def test_eager_import_of_a_name_pending_elsewhere(tmp_path: Path) -> None:
+    # sys.lazy_modules holds names only, so an eager import statement
+    # for a name another module has pending looks pending too. It is an
+    # eager load, and recorded as one, not as a native reification.
+
+    write_module(tmp_path, "pendlazy", "lazy import wave\n")
+    write_module(tmp_path, "pendeager", "import wave\n")
+
+    report = _report(
+        tmp_path,
+        """
+        import unwrapt
+
+        unwrapt.install_from_env()
+
+        import pendlazy
+        import pendeager
+        """,
+    )
+
+    eager = next(
+        edge
+        for edge in report["edges"]
+        if edge["importer"] == "pendeager" and edge["imported"] == "wave"
+    )
+
+    assert eager["loaded"] is True
+    assert eager["native_lazy"] is False
+    assert eager["already_lazy"] is False
+    assert eager["defer"] == {"native": True, "unwrapt": True, "reason": None}
+
+    loaded = Report.from_dict(report)
+    row = next(row for row in loaded_candidates(loaded) if row["edge"] == eager["id"])
+
+    assert row["saving_ms"] == eager["cum_ms"]
+    assert "already lazy" not in loaded.render_text()
+
+
+def test_native_reification_still_recognised(tmp_path: Path) -> None:
+    write_module(tmp_path, "pendlazy", "lazy import wave\n")
+
+    report = _report(
+        tmp_path,
+        """
+        import unwrapt
+
+        unwrapt.install_from_env()
+
+        import pendlazy
+
+        pendlazy.wave.Wave_read
+        """,
+    )
+
+    edge = next(edge for edge in report["edges"] if edge["imported"] == "wave")
 
     assert edge["native_lazy"] is True
     assert edge["already_lazy"] is True
